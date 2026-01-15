@@ -1,0 +1,55 @@
+[lint]
+
+select = [
+    "E",     # pycodestyle (Error)
+    "W",     # pycodestyle (Warning)
+    "F",     # pyflakes
+    "ASYNC", # flake8-async
+    "S",     # flake8-bandit
+    "UP",    # pyupgrade
+    "PL",    # pylint
+    "TID",   # flake8-tidy-imports
+    "N",     # pep8-naming
+    "B",     # flake8-bugbear
+    "A",     # flake8-builtins
+    "SLF",   # flake8-self
+    "T20",   # flake8-print
+    "ICN",   # flake8-import-conventions
+    "RUF",   # ruff (RUFF specific rules)
+    "Q",     # flake8-quotes
+    "T10",   # flake8-debugger
+    "I",     # isort
+]
+ignore = [
+    "ASYNC109", # https://docs.astral.sh/ruff/rules/async-function-with-timeout/
+    "S101",     # https://docs.astral.sh/ruff/rules/assert/
+    "S311",     # https://docs.astral.sh/ruff/rules/suspicious-non-cryptographic-random-usage/ (already monitored by semgrep)
+    "S301",     # https://docs.astral.sh/ruff/rules/suspicious-pickle-usage/ (already monitored by semgrep)
+    "S110",     # https://docs.astral.sh/ruff/rules/try-except-pass/
+    "S324",     # https://docs.astral.sh/ruff/rules/hashlib-insecure-hash-function/ (already monitored by semgrep)
+    "E501",     # https://docs.astral.sh/ruff/rules/line-too-long/
+    "PLR2004",  # https://docs.astral.sh/ruff/rules/magic-value-comparison/
+    "PLW0602",  # https://docs.astral.sh/ruff/rules/global-variable-not-assigned/
+    "PLW0603",  # https://docs.astral.sh/ruff/rules/global-statement/
+    "PLR0911",  # https://docs.astral.sh/ruff/rules/too-many-return-statements/
+    "PLR0912",  # https://docs.astral.sh/ruff/rules/too-many-branches/
+    "PLR0913",  # https://docs.astral.sh/ruff/rules/too-many-arguments/
+    "PLR0915",  # https://docs.astral.sh/ruff/rules/too-many-statements/
+    "B008",     # https://docs.astral.sh/ruff/rules/function-call-in-default-argument/
+    "B017",     # https://docs.astral.sh/ruff/rules/assert-raises-exception/
+    "PLR6301",  # https://docs.astral.sh/ruff/rules/no-self-use/
+    "PLC1901",  # https://docs.astral.sh/ruff/rules/compare-to-empty-string/
+    "S403",     # https://docs.astral.sh/ruff/rules/suspicious-pickle-import/ (already monitored by semgrep)
+    "PLC0207",  # https://docs.astral.sh/ruff/rules/missing-maxsplit-arg/
+    "PLR6201",  # https://docs.astral.sh/ruff/rules/literal-membership/
+    "PLR1702",  # https://docs.astral.sh/ruff/rules/too-many-nested-blocks/
+    "S404",     # https://docs.astral.sh/ruff/rules/suspicious-subprocess-import/
+    "PLR0917",  # https://docs.astral.sh/ruff/rules/too-many-positional-arguments/
+    "W293",     # https://docs.astral.sh/ruff/rules/blank-line-with-whitespace/
+    "RUF029",   # https://docs.astral.sh/ruff/rules/unused-async/
+    "PLR0904",  # https://docs.astral.sh/ruff/rules/too-many-public-methods/
+]
+
+[lint.flake8-import-conventions]
+# Declare the banned `from` imports.
+banned-from = ["asyncio_advanced_semaphores.lua"]
