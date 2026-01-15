@@ -1,0 +1,45 @@
+name: CI
+
+on:
+    push:
+        branches:
+            - "main"
+        tags:
+            - "v*"
+    release:
+        types: [created]
+    pull_request:
+
+jobs:
+    ci:
+        runs-on: ubuntu-24.04
+        strategy:
+            matrix:
+                python-version: ["3.12", "3.13", "3.14"]
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v5
+            - name: Set up UV
+              uses: astral-sh/setup-uv@v6
+              with:
+                  python-version: "${{ matrix.python-version }}"
+            - name: Lint
+              run: |
+                  make lint
+            - name: Test
+              run: |
+                  make test
+            - name: Check that there are no dirty files
+              run: |
+                  make no-dirty
+            - name: Check that there are no dirty files (after cleaning)
+              run: |
+                  make clean && make no-dirty
+
+    mergify-ci-status: # this is a special job for mergify
+        runs-on: ubuntu-24.04
+        needs: ["ci"]
+        steps:
+            - name: Status
+              run: |
+                  echo "OK"
