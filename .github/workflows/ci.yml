@@ -13,6 +13,11 @@ on:
 jobs:
     ci:
         runs-on: ubuntu-24.04
+        services:
+            redis:
+                image: redis:7.2
+                ports:
+                    - 6379:6379
         strategy:
             matrix:
                 python-version: ["3.12", "3.13", "3.14"]
