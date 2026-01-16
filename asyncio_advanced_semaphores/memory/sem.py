@@ -1,18 +1,11 @@
 import asyncio
-import time
+import uuid
 from dataclasses import dataclass, field
 
-from asyncio_advanced_semaphores.acquisition_id import (
-    _new_acquisition_id,
-    _pop_acquisition_id,
-    _push_acquisition_id,
-    _remove_acquisition_id,
-    _remove_acquisition_id_any_task,
-)
 from asyncio_advanced_semaphores.common import (
     Semaphore,
-    SemaphoreAcquisition,
-    SemaphoreAcquisitionStats,
+    SemaphoreStats,
+    _AcquireResult,
 )
 from asyncio_advanced_semaphores.memory.queue import (
     _DEFAULT_QUEUE_MANAGER,
@@ -20,10 +13,17 @@ from asyncio_advanced_semaphores.memory.queue import (
     _QueueManager,
     _QueueWithCreationDate,
 )
-from asyncio_advanced_semaphores.utils import _get_current_task
 
 
-@dataclass(kw_only=True, frozen=True)
+def _get_current_task() -> asyncio.Task:
+    loop = asyncio.get_running_loop()
+    task = asyncio.current_task(loop)
+    if task is None:
+        raise Exception("No running asyncio task found")  # pragma: no cover
+    return task
+
+
+@dataclass(kw_only=True)
 class MemorySemaphore(Semaphore):
     cancel_task_after_ttl: bool = False
     """If set to True, the task that acquired the slot is cancelled automatically if it's not released within the TTL.
@@ -33,6 +33,14 @@ class MemorySemaphore(Semaphore):
         default_factory=lambda: _DEFAULT_QUEUE_MANAGER
     )
     __background_tasks: set[asyncio.Task] = field(default_factory=set)
+
+    def _get_type(self) -> str:
+        return "in-memory"
+
+    def supports_multiple_simultaneous_acquisitions(self) -> bool:
+        if self.value == 1 or self.ttl is None or not self.cancel_task_after_ttl:
+            return True
+        return False
 
     @property
     def _queue(self) -> _QueueWithCreationDate:
@@ -49,28 +57,25 @@ class MemorySemaphore(Semaphore):
     async def alocked(self) -> bool:
         return await self._queue.afull()
 
-    async def acquire(self) -> SemaphoreAcquisition:
-        acquisition_id = _new_acquisition_id()
-        before = time.perf_counter()
+    async def _acquire(self) -> _AcquireResult:
+        acquisition_id = uuid.uuid4().hex
         async with asyncio.timeout(self.max_acquire_time):
             task = _get_current_task()
             try:
-                await self._queue.put(
+                slot_number = await self._queue.put(
                     _QueueItem(task=task, acquisition_id=acquisition_id)
                 )
             except asyncio.CancelledError:
                 # Make sure to not leak a slot of the semaphore on cancellation
-                await self._release(acquisition_id)
+                await self.__release(acquisition_id)
                 raise
         if self.ttl is not None:
             self._queue.add_timer(
                 acquisition_id, self.ttl, self._schedule_expire, acquisition_id
             )
-        after = time.perf_counter()
-        _push_acquisition_id(self.name, acquisition_id)
-        return SemaphoreAcquisition(id=acquisition_id, acquire_time=after - before)
+        return _AcquireResult(acquisition_id=acquisition_id, slot_number=slot_number)
 
-    async def _release(self, acquisition_id: str) -> _QueueItem | None:
+    async def __release(self, acquisition_id: str) -> _QueueItem | None:
         """Release a slot by acquisition_id (async version)."""
         self._queue.cancel_and_remove_timer(acquisition_id)
         return await self._queue.remove(acquisition_id)
@@ -89,49 +94,28 @@ class MemorySemaphore(Semaphore):
     async def _expire(self, acquisition_id: str) -> None:
         """Handle TTL expiration asynchronously."""
         self._logger.warning("TTL expired => let's release a slot of the semaphore")
-        item = await self._release(acquisition_id)
+        item = await self.__release(acquisition_id)
         if item is not None:
-            # Remove the acquisition_id from the tracker so that when the task
-            # exits the async with block, it won't try to release again
-            _remove_acquisition_id(id(item.task), self.name, acquisition_id)
             if self.cancel_task_after_ttl:
                 item.task.cancel()
 
-    async def arelease(self, acquisition_id: str | None = None) -> None:
-        if acquisition_id is None:
-            acquisition_id = _pop_acquisition_id(self.name)
-            if acquisition_id is None:
-                return
-        else:
-            # Remove the explicit acquisition_id from the tracker (may be from any task)
-            _remove_acquisition_id_any_task(self.name, acquisition_id)
-        await self._release(acquisition_id)
+    async def _arelease(self, acquisition_id: str) -> None:
+        await self.__release(acquisition_id)
 
-    def release(self, acquisition_id: str | None = None) -> None:
-        # If no acquisition_id is provided, we need to pop it from the tracker
-        # NOW (in the current task context), not in the background task.
-        # Otherwise the background task would look for acquisitions from its own
-        # task context, which would be empty.
-        if acquisition_id is None:
-            acquisition_id = _pop_acquisition_id(self.name)
-            if acquisition_id is None:
-                return
-        else:
-            # Remove the explicit acquisition_id from the tracker (may be from any task)
-            _remove_acquisition_id_any_task(self.name, acquisition_id)
+    def _release(self, acquisition_id: str) -> None:
         # Schedule the async release as a background task and return immediately.
         # This matches asyncio.Semaphore.release() behavior which also returns
         # before the effects are fully visible to other waiting tasks.
         # Note: we cannot block/wait here because time.sleep() would block the
         # event loop and prevent the background task from ever executing.
-        self._create_background_task(self._release(acquisition_id))
+        self._create_background_task(self.__release(acquisition_id))
 
     @classmethod
-    async def get_acquisition_statistics(
+    async def get_acquired_stats(
         cls,
         *,
         names: list[str] | None = None,
         limit: int = 100,
         queue_manager: _QueueManager = _DEFAULT_QUEUE_MANAGER,
-    ) -> dict[str, SemaphoreAcquisitionStats]:
-        return queue_manager.get_acquisition_statistics(names=names, limit=limit)
+    ) -> dict[str, SemaphoreStats]:
+        return queue_manager.get_acquired_stats(names=names, limit=limit)

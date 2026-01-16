@@ -55,7 +55,7 @@ no-dirty: ## Check that the repository is clean
 
 .PHONY: set-version
 set-version:
-	$(UV_RUN) python set-version.py $(VERSION) pyproject.toml async_redis_rate_limiters/__init__.py
+	$(UV_RUN) python set-version.py $(VERSION) pyproject.toml asyncio_advanced_semaphores/__init__.py
 
 .PHONY: build
 build: set-version ## Build the package

@@ -17,21 +17,21 @@ from tests.common import (
     "sem",
     [
         MemorySemaphore(value=1),
-        RedisSemaphore(value=1, client_manager=get_new_redis_client_manager()),
+        RedisSemaphore(value=1, _client_manager=get_new_redis_client_manager()),
     ],
 )
 async def test_basic_usage(sem: Semaphore):
-    async with sem as acquisition:
-        assert acquisition.acquire_time > 0
-    async with sem as acquisition:
-        assert acquisition.acquire_time > 0
+    async with sem:
+        pass
+    async with sem:
+        pass
 
 
 @pytest.mark.parametrize(
     "sem",
     [
         MemorySemaphore(value=1),
-        RedisSemaphore(value=1, client_manager=get_new_redis_client_manager()),
+        RedisSemaphore(value=1, _client_manager=get_new_redis_client_manager()),
     ],
 )
 async def test_double_acquire(sem: Semaphore):
@@ -46,7 +46,7 @@ async def test_double_acquire(sem: Semaphore):
     "sem",
     [
         MemorySemaphore(value=1),
-        RedisSemaphore(value=1, client_manager=get_new_redis_client_manager()),
+        RedisSemaphore(value=1, _client_manager=get_new_redis_client_manager()),
     ],
 )
 async def test_double_release(sem: Semaphore):
@@ -62,7 +62,7 @@ async def test_double_release(sem: Semaphore):
         RedisSemaphore(
             value=10,
             ttl=20,
-            client_manager=get_new_redis_client_manager(),
+            _client_manager=get_new_redis_client_manager(),
         ),
     ],
 )
@@ -83,7 +83,7 @@ async def test_concurrent_usage(sem: Semaphore):
             value=1,
             max_acquire_time=0.3,
             ttl=10,
-            client_manager=get_new_redis_client_manager(),
+            _client_manager=get_new_redis_client_manager(),
         ),
     ],
 )
@@ -110,7 +110,7 @@ async def test_acquire_timeout(sem: Semaphore):
         RedisSemaphore(
             value=1,
             ttl=1,
-            client_manager=get_new_redis_client_manager(),
+            _client_manager=get_new_redis_client_manager(),
         ),
     ],
 )
@@ -129,7 +129,7 @@ async def test_ttl(sem: Semaphore):
         MemorySemaphore(value=1),
         RedisSemaphore(
             value=1,
-            client_manager=get_new_redis_client_manager(),
+            _client_manager=get_new_redis_client_manager(),
         ),
     ],
 )
@@ -149,39 +149,41 @@ async def test_timeout_whole_block(sem: Semaphore):
         (
             MemorySemaphore(
                 value=10,
-                ttl=10,
+                ttl=None,
             ),
             MemorySemaphore(
                 value=20,
-                ttl=10,
+                ttl=None,
             ),
         ),
         (
             RedisSemaphore(
                 value=10,
-                client_manager=get_new_redis_client_manager(),
-                ttl=10,
+                _client_manager=get_new_redis_client_manager(),
+                heartbeat_max_interval=None,
+                ttl=None,
             ),
             RedisSemaphore(
                 value=20,
-                client_manager=get_new_redis_client_manager(),
-                ttl=10,
+                _client_manager=get_new_redis_client_manager(),
+                heartbeat_max_interval=None,
+                ttl=None,
             ),
         ),
     ],
 )
 async def test_acquisition_statistics(sems: tuple[Semaphore, Semaphore]):
     tasks = [asyncio.create_task(sem.acquire()) for sem in sems]
-    acq1 = await asyncio.gather(*tasks)
+    await asyncio.gather(*tasks)
     tasks = [
         asyncio.create_task(sem.acquire()) for sem in sems
     ]  # let's acquire two times
-    acq2 = await asyncio.gather(*tasks)
+    await asyncio.gather(*tasks)
     if isinstance(sems[0], MemorySemaphore):
-        stats = await MemorySemaphore.get_acquisition_statistics()
+        stats = await MemorySemaphore.get_acquired_stats()
     elif isinstance(sems[0], RedisSemaphore):
-        stats = await RedisSemaphore.get_acquisition_statistics(
-            client_manager=sems[0].client_manager
+        stats = await RedisSemaphore.get_acquired_stats(
+            _client_manager=sems[0]._client_manager  # noqa: SLF001
         )
     else:
         raise Exception("Unknown semaphore type")
@@ -190,20 +192,14 @@ async def test_acquisition_statistics(sems: tuple[Semaphore, Semaphore]):
     stats2 = stats[sems[1].name]
     assert math.isclose(stats1.acquired_percent, 20.0)
     assert math.isclose(stats2.acquired_percent, 10.0)
-    tasks = [
-        asyncio.create_task(sem.arelease(acquisition_id=acq.id))
-        for sem, acq in zip(sems, acq1, strict=True)
-    ]
+    tasks = [asyncio.create_task(sem.arelease()) for sem in sems]
     await asyncio.gather(*tasks)
-    tasks = [
-        asyncio.create_task(sem.arelease(acquisition_id=acq.id))
-        for sem, acq in zip(sems, acq2, strict=True)
-    ]
+    tasks = [asyncio.create_task(sem.arelease()) for sem in sems]
     await asyncio.gather(*tasks)
     if isinstance(sems[0], MemorySemaphore):
-        stats = await MemorySemaphore.get_acquisition_statistics()
+        stats = await MemorySemaphore.get_acquired_stats()
     elif isinstance(sems[0], RedisSemaphore):
-        stats = await RedisSemaphore.get_acquisition_statistics()
+        stats = await RedisSemaphore.get_acquired_stats()
     else:
         raise Exception("Unknown semaphore type")
     assert len(stats) == 0

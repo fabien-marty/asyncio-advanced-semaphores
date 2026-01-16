@@ -8,13 +8,11 @@ counter = 0
 
 async def worker1(sem: Semaphore):
     global counter
-    async with sem as acquisition:
+    async with sem:
         counter += 1
         if counter > sem.value:
             raise Exception("Concurrent limit exceeded")
         await asyncio.sleep(0.001)
-        assert acquisition.acquire_time > 0
-        assert acquisition.id
         counter -= 1
 
 

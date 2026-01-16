@@ -4,6 +4,7 @@ This document explains how `MemorySemaphore` works internally. It's an in-memory
 
 ## Features
 
+- **Drop-in compatible**: Same interface as `asyncio.Semaphore` (`acquire()` returns `bool`, `release()` takes no arguments)
 - **Named semaphores**: Multiple instances with the same name share the same underlying slots
 - **Time-to-live (TTL)**: Acquired slots are automatically released after a configurable duration
 - **Acquire timeout**: Maximum time to wait when acquiring a slot (`max_acquire_time`)
@@ -40,7 +41,7 @@ Using a dict provides several advantages:
 
 The slot tracker (`_QueueWithCreationDate`) uses an `asyncio.Condition` to synchronize access between `put()` and `remove()` operations:
 
-- **`put()`**: Acquires the condition lock, waits if dict is full, then adds the item atomically
+- **`put()`**: Acquires the condition lock, waits if dict is full, then adds the item atomically. Returns the number of items in the queue (including the new item), used as the slot number.
 - **`remove()`**: Acquires the condition lock, removes the item by key in O(1), then notifies waiters
 
 This ensures that no `put()` can sneak in while a `remove()` is in progress.
@@ -79,15 +80,13 @@ class _QueueItem:
     acquisition_id: str     # Unique identifier for this acquisition
 ```
 
-### _AcquisitionIdTracker
+### Acquisition ID Stack
 
-Located in `acquisition_id.py`, this thread-safe tracker enables releasing slots without explicitly passing the acquisition ID (useful for context manager usage).
+Each `Semaphore` instance maintains an internal `__acquisition_id_stack` (a list) that tracks acquisition IDs:
 
-- Maps `(task_id, semaphore_name)` to a **stack** (list) of acquisition IDs
 - Uses LIFO (stack) to support **nested acquisitions** of the same semaphore
-- When `release()` is called without an ID, it pops the most recent acquisition ID for the current task
-- Provides `remove_acquisition_id(task_id, name, acquisition_id)` to remove a specific ID by task reference (used during TTL expiration)
-- Automatically cleans up empty entries to prevent memory leaks
+- When `release()` is called, it pops the most recent acquisition ID from the stack
+- This is managed internally by the base `Semaphore` class, making the API compatible with `asyncio.Semaphore`
 
 ## Acquisition Flow
 
@@ -102,15 +101,19 @@ Located in `acquisition_id.py`, this thread-safe tracker enables releasing slots
 │     └─► Acquires Condition lock                                 │
 │     └─► If dict full: WAIT on Condition (with max_acquire_time) │
 │     └─► Put item and release lock                               │
+│     └─► Returns slot_number (count of items in queue)           │
 │                              │                                  │
 │                              ▼                                  │
 │  3. If TTL set: schedule timer to call _expire() after TTL      │
 │                              │                                  │
 │                              ▼                                  │
-│  4. Push acquisition_id to tracker (for context manager)        │
+│  4. Push acquisition_id to internal stack                       │
 │                              │                                  │
 │                              ▼                                  │
-│  5. Return SemaphoreAcquisition(id, acquire_time)               │
+│  5. Log acquisition (name, acquire_time, slot_number, max_slots)│
+│                              │                                  │
+│                              ▼                                  │
+│  6. Return True (compatible with asyncio.Semaphore)             │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -118,10 +121,10 @@ Located in `acquisition_id.py`, this thread-safe tracker enables releasing slots
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                   arelease(acquisition_id?)                     │
+│                         arelease()                              │
 ├─────────────────────────────────────────────────────────────────┤
-│  1. If acquisition_id is None:                                  │
-│     └─► Pop from tracker (gets most recent ID for current task) │
+│  1. Pop acquisition_id from internal stack                      │
+│     └─► Gets most recent ID (LIFO for nested acquisitions)      │
 │                              │                                  │
 │                              ▼                                  │
 │  2. Cancel any pending TTL timer for this acquisition_id        │
@@ -132,10 +135,13 @@ Located in `acquisition_id.py`, this thread-safe tracker enables releasing slots
 │     └─► Removes item by key in O(1)                             │
 │     └─► Notifies waiting acquirers that space is available      │
 │     └─► Releases lock                                           │
+│                              │                                  │
+│                              ▼                                  │
+│  4. Log release (name, type)                                    │
 └─────────────────────────────────────────────────────────────────┘
 
-Note: The sync release() method schedules arelease() as a background
-task and waits for it to complete, preserving the sync interface.
+Note: The sync release() method schedules the release as a background
+task and returns immediately, matching asyncio.Semaphore.release() behavior.
 ```
 
 ## TTL Expiration Flow
@@ -156,14 +162,10 @@ When TTL expires for an acquisition:
 │  1. Log warning about TTL expiration                            │
 │                              │                                  │
 │                              ▼                                  │
-│  2. await _release() to remove from tracker (synchronized)      │
+│  2. await _release() to remove from slot tracker (synchronized) │
 │                              │                                  │
 │                              ▼                                  │
-│  3. Remove acquisition_id from tracker using task reference     │
-│     └─► Prevents double-release when task exits async with      │
-│                              │                                  │
-│                              ▼                                  │
-│  4. If cancel_task_after_ttl=True:                              │
+│  3. If cancel_task_after_ttl=True:                              │
 │     └─► Cancel the task that was holding the slot               │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -171,10 +173,6 @@ When TTL expires for an acquisition:
 This is useful for preventing deadlocks when tasks hang or take too long.
 The expiration handler runs as a background task to allow proper async
 synchronization with the tracker's Condition lock.
-
-Note: Step 3 is important because the expiration runs in a background task,
-not in the original task's context. We use the task reference from `_QueueItem`
-to remove the acquisition_id from the correct task's tracker stack.
 
 ## Usage Examples
 
@@ -235,7 +233,7 @@ except asyncio.TimeoutError:
 ### Monitoring acquisition statistics
 
 ```python
-stats = await MemorySemaphore.get_acquisition_statistics()
+stats = await MemorySemaphore.get_acquired_stats()
 for name, stat in stats.items():
     print(f"{name}: {stat.acquired_slots}/{stat.max_slots} ({stat.acquired_percent:.1f}%)")
 ```
@@ -244,7 +242,6 @@ for name, stat in stats.items():
 
 - The `_QueueManager` uses a `threading.Lock` to protect tracker creation and access
 - The `_QueueWithCreationDate` uses an `asyncio.Condition` to synchronize `put()` and `remove()` operations
-- The `_AcquisitionIdTracker` uses a `threading.Lock` for thread safety
 - TTL timers use `asyncio.TimerHandle` which are event loop-safe
 - Background tasks (for TTL expiration and sync release) are tracked to prevent garbage collection
 

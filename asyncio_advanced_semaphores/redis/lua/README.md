@@ -4,7 +4,7 @@ This document describes the Redis keys structure and the algorithm used by the `
 
 ## Redis Keys
 
-All keys are prefixed with a configurable namespace (default: `asyncio_advanced_semaphores`).
+All keys are prefixed with a configurable namespace (default: `adv-sem`).
 
 | Key Pattern | Type | Description |
 |-------------|------|-------------|
@@ -56,7 +56,8 @@ All keys are prefixed with a configurable namespace (default: `asyncio_advanced_
 ### TTL Enforcement
 
 - The `semaphore_ttl` ZSET tracks absolute expiration times for acquisitions
-- A background task (`_TTLChecker`) periodically runs `clean_ttl.lua` to remove expired acquisitions
+- TTL cleanup is performed inline within `wake_up_nexts.lua` and `card.lua` scripts
+- Expired acquisitions (score < now) are removed from both semaphore and TTL keys
 - This ensures slots are freed even if a client holds them beyond the configured TTL
 
 ## Lua Scripts
@@ -84,7 +85,8 @@ Checks for available slots and wakes up waiting clients.
 
 **Keys:**
 - `KEYS[1]`: semaphore key (ZSET)
-- `KEYS[2]`: waiting key (ZSET)
+- `KEYS[2]`: ttl key (ZSET)
+- `KEYS[3]`: waiting key (ZSET)
 
 **Args:**
 - `ARGV[1]`: limit (max slots)
@@ -94,10 +96,11 @@ Checks for available slots and wakes up waiting clients.
 - `ARGV[5]`: acquisition_notification_key_pattern (with `@@@ACQUISITION_ID@@@` placeholder)
 
 **Behavior:**
-1. Clean expired slots from semaphore key
-2. Check available slots (limit - current count)
-3. Clean expired entries from waiting queue
-4. For each available slot:
+1. Clean expired slots from TTL key (removes from both semaphore and TTL keys)
+2. Clean expired slots from semaphore key (heartbeat expiration)
+3. Check available slots (limit - current count)
+4. Clean expired entries from waiting queue
+5. For each available slot:
    - Pop oldest waiting client (ZPOPMIN - FIFO)
    - Reserve slot in semaphore key
    - Notify client via RPUSH to notification list
@@ -125,7 +128,9 @@ Confirms an acquisition after being notified.
 - If updated, also updates TTL tracking
 - Stores max limit for statistics
 
-**Returns:** 1 if successfully updated, 0 otherwise (indicates stale acquisition)
+**Returns:** `{changed, card}` where:
+- `changed`: 1 if successfully updated, 0 otherwise (indicates stale acquisition)
+- `card`: current number of acquired slots (ZCARD of semaphore key)
 
 ### `release.lua`
 
@@ -166,28 +171,15 @@ Returns the current count of active slots.
 
 **Keys:**
 - `KEYS[1]`: semaphore key (ZSET)
-
-**Args:**
-- `ARGV[1]`: now (timestamp)
-
-**Behavior:**
-- Cleans expired slots
-- Returns ZCARD
-
-### `clean_ttl.lua`
-
-Removes acquisitions that have exceeded their TTL.
-
-**Keys:**
-- `KEYS[1]`: semaphore key (ZSET)
 - `KEYS[2]`: ttl key (ZSET)
 
 **Args:**
 - `ARGV[1]`: now (timestamp)
 
 **Behavior:**
-- Finds all entries in ttl key with score < now (expired)
-- Removes them from both semaphore and ttl keys
+- Cleans expired slots from TTL key (removes from both semaphore and TTL keys)
+- Cleans expired slots from semaphore key (heartbeat expiration)
+- Returns ZCARD
 
 ## Atomicity
 

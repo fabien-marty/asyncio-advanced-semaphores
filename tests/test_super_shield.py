@@ -3,7 +3,7 @@ import logging
 
 import pytest
 
-from asyncio_advanced_semaphores.utils import super_shield
+from asyncio_advanced_semaphores.redis.sem import _super_shield
 
 
 async def test_super_shield_task_completes_normally():
@@ -15,7 +15,7 @@ async def test_super_shield_task_completes_normally():
         result.append("done")
 
     task = asyncio.create_task(simple_task())
-    await super_shield(task, timeout=1.0)
+    await _super_shield(task, timeout=1.0)
 
     assert result == ["done"]
     assert task.done()
@@ -37,7 +37,7 @@ async def test_super_shield_protects_against_cancellation():
         raise asyncio.CancelledError()
 
     async def shielded_wrapper():
-        await super_shield(task, timeout=1.0)
+        await _super_shield(task, timeout=1.0)
 
     # Run super_shield in a task that will receive cancellation
     shield_task = asyncio.create_task(shielded_wrapper())
@@ -63,7 +63,7 @@ async def test_super_shield_timeout_exceeded(caplog: pytest.LogCaptureFixture):
     task = asyncio.create_task(very_slow_task())
 
     with caplog.at_level(logging.WARNING):
-        await super_shield(task, timeout=0.1)
+        await _super_shield(task, timeout=0.1)
 
     assert (
         "super_shield: failed to end the shielded task within the timeout"
@@ -92,7 +92,7 @@ async def test_super_shield_multiple_cancellation_attempts():
     async def shield_with_cancellations():
         nonlocal cancel_count
         try:
-            await super_shield(task, timeout=1.0)
+            await _super_shield(task, timeout=1.0)
         except asyncio.CancelledError:
             cancel_count += 1
             raise
@@ -121,7 +121,7 @@ async def test_super_shield_with_already_completed_task():
     task = asyncio.create_task(instant_task())
     await asyncio.sleep(0)  # Let the task complete
 
-    await super_shield(task, timeout=1.0)
+    await _super_shield(task, timeout=1.0)
 
     assert task.done()
     assert task.result() == "instant"
@@ -138,7 +138,7 @@ async def test_super_shield_with_failing_task():
 
     # super_shield should propagate the exception from the inner task
     with pytest.raises(ValueError, match="task failed"):
-        await super_shield(task, timeout=1.0)
+        await _super_shield(task, timeout=1.0)
 
     assert task.done()
 
@@ -154,7 +154,7 @@ async def test_super_shield_custom_logger(caplog: pytest.LogCaptureFixture):
     task = asyncio.create_task(very_slow_task())
 
     with caplog.at_level(logging.WARNING, logger="custom_test_logger"):
-        await super_shield(task, timeout=0.1, logger=custom_logger)
+        await _super_shield(task, timeout=0.1, logger=custom_logger)
 
     assert (
         "super_shield: failed to end the shielded task within the timeout"

@@ -13,5 +13,6 @@ if changed == 1 then
     redis.call('EXPIRE', ttl_key, ttl + 10)
 end
 redis.call('SET', max_key, limit, 'EX', ttl + 10)
+local card = redis.call('ZCARD', key)
 
-return changed
+return {changed, card}

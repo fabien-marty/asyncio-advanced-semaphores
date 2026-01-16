@@ -4,7 +4,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Self
 
-from asyncio_advanced_semaphores.common import SemaphoreAcquisitionStats
+from asyncio_advanced_semaphores.common import SemaphoreStats
 
 
 @dataclass
@@ -51,15 +51,19 @@ class _QueueWithCreationDate:
         async with self._condition:
             return self.full()
 
-    async def put(self, item: _QueueItem) -> None:
+    async def put(self, item: _QueueItem) -> int:
         """Add an item to the tracker, waiting if at capacity.
 
         Uses a Condition to synchronize with remove operations.
+
+        Returns:
+            The number of items in the queue (including the new item).
         """
         async with self._condition:
             while self.full():
                 await self._condition.wait()
             self._items[item.acquisition_id] = item
+            return len(self._items)
 
     async def remove(self, acquisition_id: str) -> _QueueItem | None:
         """Remove an item by acquisition_id.
@@ -133,11 +137,11 @@ class _QueueManager:
         with self.__lock:
             return len(self.__queues)
 
-    def get_acquisition_statistics(
+    def get_acquired_stats(
         self, *, names: list[str] | None = None, limit: int = 100
-    ) -> dict[str, SemaphoreAcquisitionStats]:
+    ) -> dict[str, SemaphoreStats]:
         with self.__lock:
-            results: list[tuple[str, SemaphoreAcquisitionStats]] = []
+            results: list[tuple[str, SemaphoreStats]] = []
             for name, queue in self.__queues.items():
                 if names is not None and name not in names:
                     continue
@@ -149,7 +153,7 @@ class _QueueManager:
                 results.append(
                     (
                         name,
-                        SemaphoreAcquisitionStats(
+                        SemaphoreStats(
                             acquired_slots=queue_size, max_slots=queue_max_size
                         ),
                     )

@@ -20,21 +20,21 @@ async def test_with_bad_heartbeat():
         value=1,
         ttl=60,
         heartbeat_max_interval=1,
-        client_manager=redis_client_manager,
+        _client_manager=redis_client_manager,
         _overriden_ping_func=bad_ping,
+        _no_parameter_check=True,
     )
     sem2 = RedisSemaphore(
         name="foo",
         value=1,
         ttl=60,
-        client_manager=redis_client_manager,
+        _client_manager=redis_client_manager,
     )
 
-    acq1 = await sem1.acquire()  # it will expire after 1 second (because no heartbeat)
+    await sem1.acquire()  # it will expire after 1 second (because no heartbeat)
     before = time.perf_counter()
-    acq2 = await sem2.acquire()
-    assert acq2.id != acq1.id
+    await sem2.acquire()
     after = time.perf_counter()
     assert after - before > 0.9
-    await sem2.arelease(acq2.id)
-    await sem1.arelease(acq1.id)
+    await sem2.arelease()
+    await sem1.arelease()

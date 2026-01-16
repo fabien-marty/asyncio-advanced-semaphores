@@ -1,12 +1,21 @@
 local key = KEYS[1] -- semaphore redis key (zset)
-local waiting_key = KEYS[2] -- waiting key (zset)
+local ttl_key = KEYS[2] -- ttl key (zset)
+local waiting_key = KEYS[3] -- waiting key (zset)
 local limit = tonumber(ARGV[1]) -- max number of slots
 local heartbeat_max_interval = tonumber(ARGV[2]) -- heartbeat max interval in seconds
 local ttl = tonumber(ARGV[3]) -- ttl in seconds
 local now = tonumber(ARGV[4]) -- now timestamp in seconds
 local acquisition_notification_key_pattern = ARGV[5] -- acquisition notification key pattern
 
--- Clean expired slots
+-- Clean expired slots (because of TTL)
+local removed = redis.call('ZRANGEBYSCORE', ttl_key, '-inf', now, "LIMIT", 0, 10000)
+for i = 1, #removed do
+    local acquisition_id = removed[i]
+    redis.call('ZREM', key, acquisition_id)
+    redis.call('ZREM', ttl_key, acquisition_id)
+end
+
+-- Clean expired slots (because of heartbeat)
 redis.call('ZREMRANGEBYSCORE', key, '-inf', now)
 
 -- Check if there is any available slot?
