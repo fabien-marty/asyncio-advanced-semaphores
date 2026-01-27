@@ -1,7 +1,9 @@
+from __future__ import annotations
+
 import logging
 import time
-import uuid
 from abc import ABC, abstractmethod
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 
 import stlog
@@ -51,30 +53,97 @@ class SemaphoreStats:
 
 
 @dataclass
-class _AcquireResult:
+class AcquireResult:
+    """Result of a semaphore acquisition.
+
+    This dataclass contains the acquisition ID and the slot number.
+
+    Attributes:
+        acquisition_id: The unique identifier for the acquisition.
+        slot_number: The number of the slot acquired (starting from 0).
+
+    """
+
     acquisition_id: str
+    """The unique identifier for the acquisition."""
+
     slot_number: int
+    """The number of the slot acquired (starting from 0)."""
+
+
+class SemaphoreContextManager(AbstractAsyncContextManager[AcquireResult]):
+    __semaphore: Semaphore | None
+    __result: AcquireResult | None
+
+    def __init__(self, semaphore: Semaphore):
+        self.__semaphore = semaphore
+        self.__result = None
+
+    async def __aenter__(self) -> AcquireResult:
+        """Enter the async context manager by acquiring the semaphore.
+
+        Returns:
+            An `AcquireResult` object containing the acquisition ID and the slot number.
+
+        """
+        if self.__result is not None:
+            raise Exception(
+                "MISUSE: Semaphore context manager already acquired, it looks like you shared the output of the cm() method => never do that!"
+            )
+        if self.__semaphore is None:
+            raise Exception(
+                "MISUSE: You reused the context manager after it was already exited => never do that!"
+            )
+        self.__result = await self.__semaphore.acquire()
+        return self.__result
+
+    async def __aexit__(self, exc_type, exc_value, traceback) -> None:
+        """Exit the async context manager by releasing the semaphore.
+
+        This method is called when exiting an `async with` block. It releases
+        the slot that was acquired by `__aenter__()`.
+
+        Args:
+            exc_type: The exception type if an exception was raised, else None.
+            exc_value: The exception instance if an exception was raised, else None.
+            traceback: The traceback if an exception was raised, else None.
+
+        Note:
+            The semaphore is released regardless of whether an exception occurred.
+            Exceptions are not suppressed (this method returns None).
+
+        """
+        if self.__semaphore is None:
+            raise Exception(
+                "MISUSE: You reused the context manager after it was already exited => never do that!"
+            )
+        if self.__result is None:
+            raise Exception(
+                "MISUSE: You didn't acquire the semaphore before exiting the context manager => never do that!"
+            )
+        await self.__semaphore.release(self.__result.acquisition_id)
+        self.__result = None
+        self.__semaphore = None
 
 
 @dataclass(kw_only=True)
 class Semaphore(ABC):
-    name: str = field(default_factory=lambda: uuid.uuid4().hex)
+    name: str
     """Name of the semaphore.
     
-    If not set, a random UUID is used. If you create two semaphores with the same name, they will share the same slots.
-    In that case, this is like you share the same semaphore.
+    If you create two semaphores with the same name, they will share the same slots.
     
     """
 
     value: int
-    """The number of slots available for this semaphore."""
+    """The (maximum) number of slots available for this semaphore."""
 
     max_acquire_time: float | None = None
     """The maximum time (in seconds) to acquire the semaphore.
     
     If None => no timeout is applied.
 
-    If we can't acquire the semaphore within the timeout, an asyncio.TimeoutError is raised.
+    If we can't acquire the semaphore within the timeout, an TimeoutError is raised.
     
     """
 
@@ -90,20 +159,9 @@ class Semaphore(ABC):
 
     _logger: logging.LoggerAdapter = field(default_factory=lambda: _DEFAULT_LOGGER)
 
-    __acquisition_id_stack: list[str] = field(default_factory=list)
-
     def __post_init__(self):
         if self.value <= 0:
             raise Exception("Semaphore value can't be <= 0")
-
-    @abstractmethod
-    def supports_multiple_simultaneous_acquisitions(self) -> bool:
-        """Returns True if the semaphore supports multiple simultaneous acquisitions of the same semaphore/object.
-
-        It depends on the settings of the semaphore.
-
-        """
-        pass  # pragma: no cover
 
     @abstractmethod
     def _get_type(self) -> str:
@@ -111,59 +169,45 @@ class Semaphore(ABC):
         pass  # pragma: no cover
 
     @abstractmethod
-    def locked(self):
+    async def locked(self) -> bool:
         """Returns True if semaphore cannot be acquired immediately."""
         pass  # pragma: no cover
 
     @abstractmethod
-    async def alocked(self) -> bool:
-        """Returns True if semaphore cannot be acquired immediately."""
+    async def _acquire(self) -> AcquireResult:
         pass  # pragma: no cover
 
-    @abstractmethod
-    async def _acquire(self) -> _AcquireResult:
-        """Acquire the semaphore."""
-        pass  # pragma: no cover
-
-    async def acquire(self) -> bool:
-        """Acquire the semaphore.
+    async def acquire(self) -> AcquireResult:
+        """Acquire the semaphore (manually).
 
         This method acquires one slot from the semaphore. If no slots are
         available, it waits until one becomes available or until
         `max_acquire_time` is exceeded (if set).
 
-        The acquisition is tracked internally using an acquisition ID stack,
-        allowing proper pairing with subsequent `release()` or `arelease()` calls.
+        When acquired with this method, you have to release the slot manually
+        with `release()` method.
 
         Returns:
-            True when the semaphore is successfully acquired.
+            An `AcquireResult` object containing the acquisition ID and the slot number.
 
         Raises:
-            asyncio.TimeoutError: If `max_acquire_time` is set and the
+            TimeoutError: If `max_acquire_time` is set and the
                 semaphore cannot be acquired within that time.
 
         Example:
             ```python
-            sem = MySemaphore(value=2)
-            await sem.acquire()
+            sem = MySemaphore(name="my-sem", value=2)
+            result = await sem.acquire()
             try:
                 # critical section
                 pass
             finally:
-                await sem.arelease()
+                await sem.release(result.acquisition_id)
             ```
 
         """
         before = time.perf_counter()
-        if (
-            len(self.__acquisition_id_stack) > 0
-            and not self.supports_multiple_simultaneous_acquisitions()
-        ):
-            raise Exception(
-                "This semaphore doesn't support multiple simultaneous acquisitions (with selected settings) => change the settings or use multiple semaphore objects with the same name."
-            )
         result = await self._acquire()
-        self.__acquisition_id_stack.append(result.acquisition_id)
         acquire_time = time.perf_counter() - before
         self._logger.info(
             "Acquisition successful",
@@ -173,83 +217,38 @@ class Semaphore(ABC):
             max_slots=self.value,
             type=self._get_type(),
         )
-        return True
+        return result
 
     @abstractmethod
-    def _release(self, acquisition_id: str) -> None:
-        """Release the semaphore."""
+    async def _release(self, acquisition_id: str) -> None:
         pass  # pragma: no cover
 
-    @abstractmethod
-    async def _arelease(self, acquisition_id: str) -> None:
-        """Release the semaphore."""
-        pass  # pragma: no cover
+    async def release(self, acquisition_id: str) -> None:
+        """Release the semaphore (manually).
 
-    def release(self) -> None:
-        """Release the semaphore synchronously.
-
-        This method releases one slot back to the semaphore. It uses the
-        most recent acquisition ID from the internal stack (LIFO order).
-
-        If no acquisition is currently held (empty stack), this method
-        does nothing silently.
-
-        Note:
-            For semaphore implementations that require async cleanup
-            (e.g., Redis-backed semaphores), prefer using `arelease()` instead.
+        This method releases one slot back to the semaphore.
 
         Example:
             ```python
-            sem = MySemaphore(value=2)
-            await sem.acquire()
+            sem = MySemaphore(name="my-sem", value=2)
+            result = await sem.acquire()
             try:
                 # critical section
                 pass
             finally:
-                sem.release()
+                await sem.release(result.acquisition_id)
             ```
 
         """
-        try:
-            acquisition_id = self.__acquisition_id_stack.pop()
-        except IndexError:
-            return
-        self._release(acquisition_id)
+        await self._release(acquisition_id)
         self._logger.info(
             "Release successful",
             semaphore_name=self.name,
             type=self._get_type(),
         )
 
-    async def arelease(self) -> None:
-        """Release the semaphore asynchronously.
-
-        This method releases one slot back to the semaphore. It uses the
-        most recent acquisition ID from the internal stack (LIFO order).
-
-        If no acquisition is currently held (empty stack), this method
-        does nothing silently.
-
-        This is the preferred release method for semaphore implementations
-        that require async operations (e.g., Redis-backed semaphores).
-
-        Example:
-            ```python
-            sem = MySemaphore(value=2)
-            await sem.acquire()
-            try:
-                # critical section
-                pass
-            finally:
-                await sem.arelease()
-            ```
-
-        """
-        try:
-            acquisition_id = self.__acquisition_id_stack.pop()
-        except IndexError:
-            return
-        await self._arelease(acquisition_id)
+    def cm(self) -> AbstractAsyncContextManager[AcquireResult]:
+        return SemaphoreContextManager(self)
 
     @classmethod
     @abstractmethod
@@ -287,46 +286,3 @@ class Semaphore(ABC):
 
         """
         pass  # pragma: no cover
-
-    async def __aenter__(self) -> bool:
-        """Enter the async context manager by acquiring the semaphore.
-
-        This method is called when entering an `async with` block. It acquires
-        one slot from the semaphore.
-
-        Returns:
-            True when the semaphore is successfully acquired.
-
-        Raises:
-            asyncio.TimeoutError: If `max_acquire_time` is set and the
-                semaphore cannot be acquired within that time.
-
-        Example:
-            ```python
-            sem = MySemaphore(value=2)
-            async with sem:
-                # critical section - semaphore is held
-                pass
-            # semaphore is automatically released here
-            ```
-
-        """
-        return await self.acquire()
-
-    async def __aexit__(self, exc_type, exc_value, traceback) -> None:
-        """Exit the async context manager by releasing the semaphore.
-
-        This method is called when exiting an `async with` block. It releases
-        the slot that was acquired by `__aenter__()`.
-
-        Args:
-            exc_type: The exception type if an exception was raised, else None.
-            exc_value: The exception instance if an exception was raised, else None.
-            traceback: The traceback if an exception was raised, else None.
-
-        Note:
-            The semaphore is released regardless of whether an exception occurred.
-            Exceptions are not suppressed (this method returns None).
-
-        """
-        await self.arelease()

@@ -10,7 +10,10 @@ class RedisConfig:
     """Redis connection URL (e.g., "redis://localhost:6379")."""
 
     max_connections: int = 300
-    """Redis maximum number of connections."""
+    """Redis maximum number of connections.
+    
+    Important: this number is per event loop. Be careful if you use several threads/event loops.
+    """
 
     socket_timeout: int = 30
     """Redis timeout for socket operations (seconds)."""

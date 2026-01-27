@@ -11,7 +11,8 @@ All keys are prefixed with a configurable namespace (default: `adv-sem`).
 | `{namespace}:semaphore_main:{name}` | ZSET | Main semaphore key. Members are `acquisition_id`, scores are expiration timestamps (now + heartbeat_max_interval). Expired members indicate dead clients. |
 | `{namespace}:semaphore_ttl:{name}` | ZSET | TTL tracking. Members are `acquisition_id`, scores are absolute TTL expiration timestamps. Used to enforce maximum hold time. |
 | `{namespace}:semaphore_max:{name}` | STRING | Stores the maximum number of slots for this semaphore. Used for statistics. |
-| `{namespace}:semaphore_waiting:{name}` | ZSET | Waiting queue. Members are `acquisition_id`, scores are expiration timestamps. FIFO order is preserved by score (insertion time + heartbeat). |
+| `{namespace}:semaphore_waiting:{name}` | ZSET | Waiting queue for FIFO ordering. Members are `acquisition_id`, scores are insertion timestamps. FIFO order is strictly preserved by score (insertion time only). |
+| `{namespace}:semaphore_waiting_heartbeat:{name}` | ZSET | Waiting queue for liveness detection. Members are `acquisition_id`, scores are expiration timestamps (now + heartbeat_max_interval). Used to detect dead waiting clients. |
 | `{namespace}:acquisition_notification:{acquisition_id}` | LIST | Per-acquisition notification channel. Used to wake up a specific waiting client when a slot becomes available. |
 
 ## Algorithm Overview
@@ -49,7 +50,7 @@ All keys are prefixed with a configurable namespace (default: `adv-sem`).
 
 ### Liveness Detection
 
-- **Heartbeat (ping)**: Clients periodically refresh their score in both `semaphore_waiting` and `semaphore_main` keys
+- **Heartbeat (ping)**: Clients periodically refresh their score in both `semaphore_waiting_heartbeat` and `semaphore_main` keys
 - **Expiration**: If a client fails to heartbeat within `heartbeat_max_interval`, its score becomes < now and it's considered expired
 - **Cleanup**: Expired entries are removed via `ZREMRANGEBYSCORE key -inf now`
 
@@ -64,10 +65,11 @@ All keys are prefixed with a configurable namespace (default: `adv-sem`).
 
 ### `queue.lua`
 
-Adds a client to the waiting queue.
+Adds a client to both waiting queues.
 
 **Keys:**
-- `KEYS[1]`: waiting key (ZSET)
+- `KEYS[1]`: waiting key (ZSET) - for FIFO ordering
+- `KEYS[2]`: waiting key with heartbeat (ZSET) - for liveness detection
 
 **Args:**
 - `ARGV[1]`: acquisition_id
@@ -76,8 +78,9 @@ Adds a client to the waiting queue.
 - `ARGV[4]`: now (timestamp)
 
 **Behavior:**
-- Adds acquisition_id to waiting queue with score = now + heartbeat_max_interval
-- Sets expiry on the key
+- Adds acquisition_id to waiting queue with score = now (FIFO ordering)
+- Adds acquisition_id to waiting heartbeat queue with score = now + heartbeat_max_interval
+- Sets expiry on both keys
 
 ### `wake_up_nexts.lua`
 
@@ -86,7 +89,8 @@ Checks for available slots and wakes up waiting clients.
 **Keys:**
 - `KEYS[1]`: semaphore key (ZSET)
 - `KEYS[2]`: ttl key (ZSET)
-- `KEYS[3]`: waiting key (ZSET)
+- `KEYS[3]`: waiting key (ZSET) - for FIFO ordering
+- `KEYS[4]`: waiting key with heartbeat (ZSET) - for liveness detection
 
 **Args:**
 - `ARGV[1]`: limit (max slots)
@@ -99,9 +103,10 @@ Checks for available slots and wakes up waiting clients.
 1. Clean expired slots from TTL key (removes from both semaphore and TTL keys)
 2. Clean expired slots from semaphore key (heartbeat expiration)
 3. Check available slots (limit - current count)
-4. Clean expired entries from waiting queue
+4. Clean expired entries from both waiting queues (using heartbeat queue for expiration detection)
 5. For each available slot:
-   - Pop oldest waiting client (ZPOPMIN - FIFO)
+   - Pop oldest waiting client from waiting queue (ZPOPMIN - FIFO based on insertion time)
+   - Remove the client from the waiting heartbeat queue
    - Reserve slot in semaphore key
    - Notify client via RPUSH to notification list
 
@@ -140,12 +145,13 @@ Releases an acquired slot.
 - `KEYS[1]`: semaphore key (ZSET)
 - `KEYS[2]`: ttl key (ZSET)
 - `KEYS[3]`: waiting key (ZSET)
+- `KEYS[4]`: waiting key with heartbeat (ZSET)
 
 **Args:**
 - `ARGV[1]`: acquisition_id
 
 **Behavior:**
-- Removes acquisition_id from all three keys
+- Removes acquisition_id from all four keys
 
 **Returns:** Number of elements removed from semaphore key (0 or 1)
 
@@ -154,7 +160,7 @@ Releases an acquired slot.
 Refreshes heartbeat for a client (in waiting queue or holding a slot).
 
 **Keys:**
-- `KEYS[1]`: waiting key (ZSET)
+- `KEYS[1]`: waiting key with heartbeat (ZSET)
 - `KEYS[2]`: semaphore key (ZSET)
 
 **Args:**
@@ -163,7 +169,8 @@ Refreshes heartbeat for a client (in waiting queue or holding a slot).
 - `ARGV[3]`: now (timestamp)
 
 **Behavior:**
-- Updates score with `ZADD XX` (only if exists) in both keys
+- Updates score with `ZADD XX` (only if exists) in waiting heartbeat key and semaphore key
+- Note: Does NOT update the waiting key (FIFO ordering) to preserve queue position
 
 ### `card.lua`
 
@@ -190,5 +197,11 @@ All scripts run atomically in Redis (single-threaded execution). This guarantees
 
 ## Fairness
 
-The waiting queue uses ZSET with insertion timestamp as score, combined with `ZPOPMIN` to ensure FIFO ordering. First client to queue gets the first available slot.
+The implementation uses two separate waiting queues to achieve strict FIFO ordering:
+
+1. **`semaphore_waiting`**: Stores insertion timestamps as scores. This queue determines the order in which clients are granted slots using `ZPOPMIN`. The score is set once at insertion time and never updated.
+
+2. **`semaphore_waiting_heartbeat`**: Stores heartbeat expiration timestamps as scores. This queue is used for liveness detection - clients that fail to heartbeat are removed from both queues.
+
+This separation ensures that heartbeat refreshes do not affect queue position. First client to queue always gets the first available slot, regardless of when heartbeats occur.
 
