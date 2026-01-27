@@ -7,7 +7,6 @@ from asyncio_advanced_semaphores import MemorySemaphore, RedisSemaphore, Semapho
 from tests.common import (
     assert_locked,
     assert_not_locked,
-    get_new_redis_client_manager,
     worker1,
     worker2,
 )
@@ -16,53 +15,60 @@ from tests.common import (
 @pytest.mark.parametrize(
     "sem",
     [
-        MemorySemaphore(value=1),
-        RedisSemaphore(value=1, _client_manager=get_new_redis_client_manager()),
+        MemorySemaphore(name="test-basic", value=1),
+        RedisSemaphore(name="test-basic", value=1),
     ],
 )
 async def test_basic_usage(sem: Semaphore):
-    async with sem:
+    async with sem.cm():
         pass
-    async with sem:
+    async with sem.cm():
         pass
 
 
 @pytest.mark.parametrize(
     "sem",
     [
-        MemorySemaphore(value=1),
-        RedisSemaphore(value=1, _client_manager=get_new_redis_client_manager()),
+        MemorySemaphore(name="test-double-acquire", value=1),
+        RedisSemaphore(
+            name="test-double-acquire",
+            value=1,
+        ),
     ],
 )
 async def test_double_acquire(sem: Semaphore):
-    await sem.acquire()
+    result = await sem.acquire()
     with pytest.raises(TimeoutError):
         async with asyncio.timeout(0.1):
             await sem.acquire()
-    await sem.arelease()
+    await sem.release(result.acquisition_id)
 
 
 @pytest.mark.parametrize(
     "sem",
     [
-        MemorySemaphore(value=1),
-        RedisSemaphore(value=1, _client_manager=get_new_redis_client_manager()),
+        MemorySemaphore(name="test-double-release", value=1),
+        RedisSemaphore(
+            name="test-double-release",
+            value=1,
+        ),
     ],
 )
 async def test_double_release(sem: Semaphore):
-    await sem.acquire()
-    await sem.arelease()
-    await sem.arelease()
+    result = await sem.acquire()
+    await sem.release(result.acquisition_id)
+    # Releasing the same acquisition_id again should be a no-op (idempotent)
+    await sem.release(result.acquisition_id)
 
 
 @pytest.mark.parametrize(
     "sem",
     [
-        MemorySemaphore(value=10, ttl=10),
+        MemorySemaphore(name="test-concurrent", value=10, ttl=10),
         RedisSemaphore(
+            name="test-concurrent",
             value=10,
             ttl=20,
-            _client_manager=get_new_redis_client_manager(),
         ),
     ],
 )
@@ -75,15 +81,16 @@ async def test_concurrent_usage(sem: Semaphore):
     "sem",
     [
         MemorySemaphore(
+            name="test-acquire-timeout",
             value=1,
             max_acquire_time=0.3,
             ttl=10,
         ),
         RedisSemaphore(
+            name="test-acquire-timeout",
             value=1,
             max_acquire_time=0.3,
             ttl=10,
-            _client_manager=get_new_redis_client_manager(),
         ),
     ],
 )
@@ -92,7 +99,7 @@ async def test_acquire_timeout(sem: Semaphore):
     await asyncio.sleep(0.05)
     await assert_locked(sem)
     try:
-        async with sem:
+        async with sem.cm():
             raise Exception("should not be able to acquire the semaphore")
     except TimeoutError:
         pass
@@ -104,13 +111,14 @@ async def test_acquire_timeout(sem: Semaphore):
     "sem",
     [
         MemorySemaphore(
+            name="test-ttl",
             value=1,
             ttl=1,
         ),
         RedisSemaphore(
+            name="test-ttl",
             value=1,
             ttl=1,
-            _client_manager=get_new_redis_client_manager(),
         ),
     ],
 )
@@ -126,17 +134,17 @@ async def test_ttl(sem: Semaphore):
 @pytest.mark.parametrize(
     "sem",
     [
-        MemorySemaphore(value=1),
+        MemorySemaphore(name="test-timeout-whole-block", value=1),
         RedisSemaphore(
+            name="test-timeout-whole-block",
             value=1,
-            _client_manager=get_new_redis_client_manager(),
         ),
     ],
 )
 async def test_timeout_whole_block(sem: Semaphore):
     try:
         async with asyncio.timeout(0.1):
-            async with sem:
+            async with sem.cm():
                 await asyncio.sleep(1)
     except TimeoutError:
         pass
@@ -148,24 +156,26 @@ async def test_timeout_whole_block(sem: Semaphore):
     [
         (
             MemorySemaphore(
+                name="test-stats-1",
                 value=10,
                 ttl=None,
             ),
             MemorySemaphore(
+                name="test-stats-2",
                 value=20,
                 ttl=None,
             ),
         ),
         (
             RedisSemaphore(
+                name="test-stats-1",
                 value=10,
-                _client_manager=get_new_redis_client_manager(),
                 heartbeat_max_interval=None,
                 ttl=None,
             ),
             RedisSemaphore(
+                name="test-stats-2",
                 value=20,
-                _client_manager=get_new_redis_client_manager(),
                 heartbeat_max_interval=None,
                 ttl=None,
             ),
@@ -173,18 +183,13 @@ async def test_timeout_whole_block(sem: Semaphore):
     ],
 )
 async def test_acquisition_statistics(sems: tuple[Semaphore, Semaphore]):
-    tasks = [asyncio.create_task(sem.acquire()) for sem in sems]
-    await asyncio.gather(*tasks)
-    tasks = [
-        asyncio.create_task(sem.acquire()) for sem in sems
-    ]  # let's acquire two times
-    await asyncio.gather(*tasks)
+    # Acquire twice on each semaphore, storing the results
+    results1 = [await sem.acquire() for sem in sems]
+    results2 = [await sem.acquire() for sem in sems]
     if isinstance(sems[0], MemorySemaphore):
         stats = await MemorySemaphore.get_acquired_stats()
     elif isinstance(sems[0], RedisSemaphore):
-        stats = await RedisSemaphore.get_acquired_stats(
-            _client_manager=sems[0]._client_manager  # noqa: SLF001
-        )
+        stats = await RedisSemaphore.get_acquired_stats()
     else:
         raise Exception("Unknown semaphore type")
     assert len(stats) == len(sems)
@@ -192,10 +197,11 @@ async def test_acquisition_statistics(sems: tuple[Semaphore, Semaphore]):
     stats2 = stats[sems[1].name]
     assert math.isclose(stats1.acquired_percent, 20.0)
     assert math.isclose(stats2.acquired_percent, 10.0)
-    tasks = [asyncio.create_task(sem.arelease()) for sem in sems]
-    await asyncio.gather(*tasks)
-    tasks = [asyncio.create_task(sem.arelease()) for sem in sems]
-    await asyncio.gather(*tasks)
+    # Release all acquisitions
+    for sem, result in zip(sems, results1, strict=True):
+        await sem.release(result.acquisition_id)
+    for sem, result in zip(sems, results2, strict=True):
+        await sem.release(result.acquisition_id)
     if isinstance(sems[0], MemorySemaphore):
         stats = await MemorySemaphore.get_acquired_stats()
     elif isinstance(sems[0], RedisSemaphore):

@@ -1,6 +1,7 @@
 local key = KEYS[1] -- semaphore redis key (zset)
 local ttl_key = KEYS[2] -- ttl key (zset)
 local waiting_key = KEYS[3] -- waiting key (zset)
+local waiting_key_heartbeat = KEYS[4] -- waiting key with heartbeat (zset)
 local limit = tonumber(ARGV[1]) -- max number of slots
 local heartbeat_max_interval = tonumber(ARGV[2]) -- heartbeat max interval in seconds
 local ttl = tonumber(ARGV[3]) -- ttl in seconds
@@ -25,14 +26,20 @@ if card >= limit then
     return 0
 end
 
--- Clean expired slots in the waiting key
-redis.call('ZREMRANGEBYSCORE', waiting_key, '-inf', now)
+-- Clean expired slots in the waiting keys
+removed = redis.call('ZRANGEBYSCORE', waiting_key_heartbeat, '-inf', now, "LIMIT", 0, 10000)
+for i = 1, #removed do
+    local acquisition_id = removed[i]
+    redis.call('ZREM', waiting_key_heartbeat, acquisition_id)
+    redis.call('ZREM', waiting_key, acquisition_id)
+end
 
 local notified = 0
+local slots_to_fill = limit - card
 
 -- We have some available slots
--- Try to fill available slots (limit - card iterations)
-for i = 1, limit - card do
+-- Try to fill available slots (continue until we've granted enough OR queue is empty)
+while notified < slots_to_fill do
 
     local next_acquisition = redis.call('ZPOPMIN', waiting_key)
     if #next_acquisition == 0 then
@@ -40,13 +47,19 @@ for i = 1, limit - card do
         break
     end
     local next_acquisition_id = next_acquisition[1]
-    notified = notified + 1
 
-    -- Let's reserve a slot
-    redis.call('ZADD', key, now + heartbeat_max_interval, next_acquisition_id)
-    redis.call('EXPIRE', key, ttl + 10)
+    -- Remove from heartbeat tracking since we're granting the slot
+    redis.call('ZREM', waiting_key_heartbeat, next_acquisition_id)
 
-    -- Let's wake up the acquisition
+    -- Let's reserve a slot (NX = only if not already holding a slot)
+    local added = redis.call('ZADD', key, 'NX', now + heartbeat_max_interval, next_acquisition_id)
+    if added == 1 then
+        -- New slot was actually granted
+        notified = notified + 1
+        redis.call('EXPIRE', key, ttl + 10)
+    end
+    -- Always send notification (even if client already had a slot from retry scenario,
+    -- they consumed the previous notification and need a new one to proceed)
     local next_acquisition_list_key = string.gsub(acquisition_notification_key_pattern, "@@@ACQUISITION_ID@@@", next_acquisition_id, 1)
     redis.call('RPUSH', next_acquisition_list_key, '1')
     redis.call('EXPIRE', next_acquisition_list_key, heartbeat_max_interval + 10)

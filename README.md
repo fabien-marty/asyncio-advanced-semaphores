@@ -1,27 +1,35 @@
 # asyncio-advanced-semaphores
 
-**Production-ready asyncio semaphores with TTL, heartbeat, fair-queueing, and distributed support (redis).**
+**Production-ready asyncio semaphores with TTL, heartbeat, fair-queueing, thread-safety, and distributed support (redis).**
+
+> [!WARNING]
+> This project is a work in progress. Do not use it in production environments yet.
 
 ## Why Use This?
 
 Traditional `asyncio.Semaphore` works great until it doesn't:
 
-- **Distributed systems with multiple machines?** Good luck coordinating rate limits across multiple instances.
+- **Distributed systems with multiple threads/machines?** Good luck coordinating rate limits across multiple instances.
 - **TTL support?** If you want to limit the time a task can hold a slot, you need to implement it yourself (and it's not easy!).
 - **Heartbeat support?** In distributed mode, you don't want to leak slots for long when a machine is brutally killed.
 - **Zero visibility?** No idea which semaphores are congested or why.
 
-This library solves all of that with a familiar, drop-in API.
+This library solves all of that.
 
 ## Features
 
-- 🔄 **Drop-in compatible** with `asyncio.Semaphore` interface
 - ⏱️ **TTL (Time To Live)** — Automatic slot expiration prevents deadlocks from crashed tasks
 - 💓 **Heartbeat system** — Distributed semaphores stay alive with automatic keep-alive pings
 - ⚖️ **Fair queueing** — First-come, first-served acquisition prevents starvation
 - 🌐 **Distributed coordination (or not)** — Redis-backed semaphores work across processes and machines, Memory-backed semaphores work only locally
 - 🔍 **Built-in observability** — Query acquisition statistics to monitor congestion
-- 🛡️ **Cancellation-safe** — Proper cleanup on task cancellation, no leaked slots
+- 🛡️ **Thread-safety** — You can acquire semaphores from multiple threads
+
+## Limitations
+
+- We only support an async interface
+- We don't support "Redis Cluster" for the moment (for the distributed semaphore implementation)
+- All clients must be reasonably time synchronized (NTP)
 
 ## Installation
 
@@ -40,11 +48,12 @@ import asyncio
 from asyncio_advanced_semaphores import MemorySemaphore
 
 # Limit to 10 concurrent operations
-sem = MemorySemaphore(value=10)
+sem = MemorySemaphore(name="my-semaphore", value=10)
 
 async def limited_operation():
-    async with sem:
-        print("Acquired slot!")
+    # note: cm() means "context manager"
+    async with sem.cm() as acquired_result:
+        print(f"Acquired slot id={acquired_result.acquisition_id}, slot_number={acquired_result.slot_number}!")
         await asyncio.sleep(1)  # Do some work
     print("Released slot!")
 
@@ -77,12 +86,31 @@ sem = RedisSemaphore(
 )
 
 async def call_external_api():
-    async with sem:
-        print("Acquired distributed slot!")
+    # note: cm() means "context manager"
+    async with sem.cm() as acquired_result:
+        print(f"Acquired slot id={acquired_result.acquisition_id}, slot_number={acquired_result.slot_number}!")
         await make_api_request()
     print("Released distributed slot!")
 
 asyncio.run(call_external_api())
+```
+
+### Manual Acquire/Release
+
+If you need more control, you can manually acquire and release slots using the `acquire()` and `release()` methods:
+
+```python
+from asyncio_advanced_semaphores import MemorySemaphore
+
+sem = MemorySemaphore(name="my-semaphore", value=2)
+
+async def manual_usage():
+    result = await sem.acquire()
+    try:
+        # critical section
+        print(f"Acquired slot {result.slot_number}")
+    finally:
+        await sem.release(result.acquisition_id)
 ```
 
 ### Observability
@@ -98,56 +126,102 @@ for name, stat in stats.items():
     print(f"{name}: {stat.acquired_slots}/{stat.max_slots} ({stat.acquired_percent:.1f}%)")
 ```
 
-## Important note about the implementation
+## Advanced Usage
 
-This library provides a **drop-in replacement** for `asyncio.Semaphore` — the `acquire()`, `release()`, and async context manager interfaces work exactly as expected.
+### Different semaphore objects with the same name
 
-However, some advanced features require a specific usage pattern when **reusing the same semaphore object** for multiple simultaneous acquisitions (i.e., calling `acquire()` multiple times on the same object before releasing).
-
-### When is this relevant?
-
-This limitation applies **only when `value > 1`** and you want to use:
-
-| Semaphore Type | Feature Restriction |
-|----------------|---------------------|
-| `MemorySemaphore` | `ttl` + `cancel_task_after_ttl=True` |
-| `RedisSemaphore` | `ttl` or `heartbeat_max_interval` (enabled by default) |
-
-### What happens if you violate this?
-
-If you try to call `acquire()` on the same semaphore object while it already holds an acquisition, you'll get an explicit exception:
-
-```
-Exception: This semaphore doesn't support multiple simultaneous acquisitions
-(with selected settings) => change the settings or use multiple semaphore
-objects with the same name.
-```
-
-### The solution: use separate objects with the same name
-
-Instead of reusing the same semaphore object, create multiple semaphore objects with the **same name**. They will share the same underlying slots:
+You can create different semaphore objects with the same `name` attribute. They will share the same slots.
 
 ```python
-import asyncio
+from asyncio_advanced_semaphores import MemorySemaphore
+
+sem1 = MemorySemaphore(name="my-semaphore", value=1)
+sem2 = MemorySemaphore(name="my-semaphore", value=1)
+
+# Let's acquire my-semaphore with the first semaphore object
+sem1_acquired_result = await sem1.acquire()
+
+print(await sem2.locked()) # True, because sem1 and sem2 share the same slots (same name)
+
+await sem1.release(sem1_acquired_result.acquisition_id)
+
+print(await sem2.locked()) # False, because sem1 and sem2 share the same slots (same name)
+```
+
+### Thread-safety
+
+You can use the semaphore objects from multiple threads. Each thread will have its own event loop. You can share the same semaphore objects across threads or using distinct semaphore objects.
+
+If you use distinct semaphore objects but with the same `name` attribute, they will share the same slots.
+
+### TTL (Time To Live)
+
+You can set the `ttl` attribute to the number of seconds after which the slot will be released automatically.
+
+```python
+from asyncio_advanced_semaphores import MemorySemaphore
+
+sem = MemorySemaphore(name="my-semaphore", value=1, ttl=1)
+
+# Let's acquire my-semaphore with the first semaphore object
+result = await sem.acquire()
+
+time.sleep(2)
+# NOTE: the semaphore will be released automatically after 1 second (TTL)
+```
+
+### Max Acquire Time
+
+You can set the `max_acquire_time` attribute to the maximum number of seconds to wait for the slot to be acquired.
+If the slot is not acquired within the timeout, an `TimeoutError` is raised.
+
+```python
+from asyncio_advanced_semaphores import MemorySemaphore
+
+sem = MemorySemaphore(name="my-semaphore", value=1, max_acquire_time=1)
+
+# Let's acquire my-semaphore with the first semaphore object
+result1 = await sem.acquire()
+
+try:
+    result2 = await sem.acquire()
+except TimeoutError:
+    # TimeoutError will be raised after 1 second (max_acquire_time)
+    pass
+
+await sem.release(result1.acquisition_id)
+```
+
+### Heartbeat
+
+With `RedisSemaphore`, if you set a long `ttl` value (or no TTL at all), you can set a `heartbeat_max_interval` (default to 180 seconds) value to keep the slot alive.
+
+```python
 from asyncio_advanced_semaphores import RedisSemaphore, RedisConfig
 
-config = RedisConfig(url="redis://localhost:6379")
+# Configure Redis connection
+config = RedisConfig(
+    url="redis://localhost:6379",
+    namespace="my-app",
+)
 
-async def task_a():
-    # Each task creates its own semaphore object with the same name
-    sem = RedisSemaphore(name="shared-resource", value=5, config=config)
-    async with sem:
-        await do_work()
+sem = RedisSemaphore(name="my-semaphore", value=1, ttl=86400, heartbeat_max_interval=180, config=config)
 
-async def task_b():
-    # Same name = same shared slots, but separate object = no conflict
-    sem = RedisSemaphore(name="shared-resource", value=5, config=config)
-    async with sem:
-        await do_other_work()
+# Let's acquire the semaphore
+result = await sem.acquire()
 
-async def main():
-    await asyncio.gather(task_a(), task_b())
+# do your async work...
+# (a heartbeat will be automatically and regularly sent to the Redis server to keep the slot alive)
+
+# If the program or the machine is brutally killed, the semaphore won't be released (no time to do that!)
+# But the heartbeat task will disappear also and the semaphore will be released automatically after the
+# `heartbeat_max_interval` value (180 seconds) which is a lot lower than the `ttl` value (86400 seconds).
 ```
+
+[!WARNING]
+The heartbeat task is completly automatic (you don't have to do anything to keep the slot alive) but this is an
+asynchronous task. So don't block the event loop for too long to avoid blocking the heartbeat task and automatically
+releasing the slot.
 
 ## DEV
 

@@ -8,7 +8,7 @@ counter = 0
 
 async def worker1(sem: Semaphore):
     global counter
-    async with sem:
+    async with sem.cm():
         counter += 1
         if counter > sem.value:
             raise Exception("Concurrent limit exceeded")
@@ -17,29 +17,22 @@ async def worker1(sem: Semaphore):
 
 
 async def worker2(sem: Semaphore, sleep: float = 0.5):
-    async with sem:
+    async with sem.cm():
         await asyncio.sleep(sleep)
 
 
 async def worker3(sem: Semaphore):
-    async with sem:
+    async with sem.cm():
         await asyncio.sleep(3)
         raise Exception("should not happen")
 
 
-async def locked(sem: Semaphore) -> bool:
-    try:
-        return sem.locked()
-    except NotImplementedError:
-        return await sem.alocked()
-
-
 async def assert_locked(sem: Semaphore):
-    assert await locked(sem)
+    assert await sem.locked()
 
 
 async def assert_not_locked(sem: Semaphore):
-    assert not await locked(sem)
+    assert not await sem.locked()
 
 
 def get_new_redis_client_manager() -> RedisClientManager:

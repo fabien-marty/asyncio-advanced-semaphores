@@ -7,6 +7,7 @@ local heartbeat_max_interval = tonumber(ARGV[3]) -- heartbeat max interval in se
 local ttl = tonumber(ARGV[4]) -- ttl in seconds
 local now = tonumber(ARGV[5]) -- now timestamp in seconds
 
+-- XX: Only update elements that already exist. Don't add new elements.
 local changed = redis.call('ZADD', key, 'XX', 'CH', now + heartbeat_max_interval, acquisition_id)
 if changed == 1 then
     redis.call('ZADD', ttl_key, now + ttl, acquisition_id)

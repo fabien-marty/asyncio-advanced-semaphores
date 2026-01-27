@@ -1,8 +1,8 @@
 import asyncio
-import functools
 import itertools
 import logging
 import math
+import threading
 import time
 import uuid
 from collections.abc import Callable, Coroutine
@@ -15,13 +15,14 @@ from tenacity import before_sleep_log
 
 from asyncio_advanced_semaphores.common import (
     _DEFAULT_LOGGER,
+    AcquireResult,
     Semaphore,
     SemaphoreStats,
-    _AcquireResult,
 )
 from asyncio_advanced_semaphores.redis import lua
 from asyncio_advanced_semaphores.redis.client import (
     RedisClientManager,
+    _get_client_manager,
 )
 from asyncio_advanced_semaphores.redis.conf import RedisConfig
 
@@ -93,24 +94,26 @@ class RedisSemaphore(Semaphore):
     config: RedisConfig = field(default_factory=RedisConfig)
     """Redis configuration."""
 
-    heartbeat_max_interval: int | None = 5
-    """The maximum interval (in seconds) between heartbeats. Only for Redis semaphore implementations.
+    heartbeat_max_interval: int | None = 180
+    """The maximum interval (in seconds) between two successful heartbeats.
 
-    If a client doesn't send a heartbeat within the interval, the slot is released automatically.
+    We recommend to NOT set this value too low (a few minutes is probably a good value).
+
+    If a client doesn't send a successful heartbeat within the interval, the slot is released automatically.
 
     If set to None, the heartbeat is disabled (we discourage this setting).
 
     """
 
-    _client_manager: RedisClientManager | None = None
-    """Can be used to override the default client manager. If set, the config is ignored."""
+    ping_interval: float | None = None
+    """ADVANCED: the interval (in seconds) between heartbeats.
 
-    _ping_interval: float | None = None
-    """The interval (in seconds) between heartbeats.
-    
-    Must be lower than heartbeat_max_interval divided by 5 and greater.
+    If set to None, we will calculate and use a good default value
+    (heartbeat_max_interval divided by 5).
 
-    If _ping_interval is not set (default), let's set it to heartbeat_max_interval divided by 5.
+    Must be lower than heartbeat_max_interval.
+
+    We recommend to let this value to None.
 
     """
 
@@ -133,79 +136,60 @@ class RedisSemaphore(Semaphore):
     # Only for unit testing purposes
     _overriden_ping_func: Callable[[str], Coroutine[Any, Any, None]] | None = None
 
-    # No parameter check (only for unit testing purposes)
-    _no_parameter_check: bool = False
-
     # Internal storage for ping tasks (acquisition_id -> task)
     _ping_tasks: dict[str, asyncio.Task] = field(default_factory=dict)
 
+    _ping_task_lock: threading.Lock = field(default_factory=threading.Lock)
+
     def __post_init__(self):
-        if not self._no_parameter_check:
-            if (
-                self.heartbeat_max_interval is not None
-                and self.heartbeat_max_interval < 5
-            ):
-                raise ValueError("heartbeat_max_interval must be greater than 5")
-            if (
-                self.heartbeat_max_interval is not None
-                and self._ping_interval is not None
-                and self._ping_interval >= self.heartbeat_max_interval / 5
-            ):
-                raise ValueError(
-                    "ping_interval must be lower than heartbeat_max_interval divided by 5"
-                )
-            if self._ping_interval is not None and self._ping_interval < 1.0:
-                raise ValueError("ping_interval must be greater than 1.0")
+        if (
+            self.heartbeat_max_interval is not None
+            and self.ping_interval is not None
+            and self.ping_interval >= self.heartbeat_max_interval
+        ):
+            raise ValueError("ping_interval must be lower than heartbeat_max_interval")
         super().__post_init__()
 
     def _get_type(self) -> str:
         return "redis"
 
-    def supports_multiple_simultaneous_acquisitions(self) -> bool:
-        if self.value == 1:
-            return True
-        if self.heartbeat_max_interval is None and self.ttl is None:
-            return True
-        return False
-
     @property
-    def _resolved_ping_interval(self) -> float:
-        if self._ping_interval is not None:
-            return self._ping_interval
+    def _ping_interval(self) -> float:
+        if self.ping_interval is not None:
+            return self.ping_interval
         if self.heartbeat_max_interval is None:
-            return 1.0  # wo'nt be used, only for keeping the interface consistent
+            return 1.0  # won't be used, only for keeping the interface consistent
         return self.heartbeat_max_interval / 5.0
 
     @property
-    def _resolved_heartbeat_max_interval(self) -> int:
+    def _heartbeat_max_interval(self) -> int:
         if self.heartbeat_max_interval is None:
             return _MAX_REDIS_EXPIRE_VALUE - 10  # as we add 10 seconds in the LUA part
         return self.heartbeat_max_interval
 
-    @functools.cached_property
-    def __client_manager(self) -> RedisClientManager:
-        if self._client_manager is not None:
-            return self._client_manager
-        return RedisClientManager(conf=self.config)
+    @property
+    def _client_manager(self) -> RedisClientManager:
+        return _get_client_manager(self.config)
 
     def _get_semaphore_key(self, name: str) -> str:
-        return _get_semaphore_key(
-            name=name, namespace=self.__client_manager.conf.namespace
-        )
+        return _get_semaphore_key(name=name, namespace=self.config.namespace)
 
     def _get_semaphore_max_key(self, name: str) -> str:
-        return _get_max_key(name=name, namespace=self.__client_manager.conf.namespace)
+        return _get_max_key(name=name, namespace=self.config.namespace)
 
     def _get_semaphore_ttl_key(self, name: str) -> str:
-        return _get_semaphore_ttl_key(
-            name=name, namespace=self.__client_manager.conf.namespace
-        )
+        return _get_semaphore_ttl_key(name=name, namespace=self.config.namespace)
 
     def _get_semaphore_waiting_key(self, name: str) -> str:
-        return f"{self.__client_manager.conf.namespace}:semaphore_waiting:{name}"
+        return f"{self._client_manager.conf.namespace}:semaphore_waiting:{name}"
+
+    def _get_semaphore_waiting_heartbeat_key(self, name: str) -> str:
+        return (
+            f"{self._client_manager.conf.namespace}:semaphore_waiting_heartbeat:{name}"
+        )
 
     def _get_acquisition_notification_key(self, acquisition_id: str) -> str:
-        return f"{self.__client_manager.conf.namespace}:acquisition_notification:{acquisition_id}"
+        return f"{self._client_manager.conf.namespace}:acquisition_notification:{acquisition_id}"
 
     @property
     def _resolved_ttl(self) -> int:
@@ -216,7 +200,7 @@ class RedisSemaphore(Semaphore):
         )
 
     def _async_retrying(self) -> tenacity.AsyncRetrying:
-        conf = self.__client_manager.conf
+        conf = self._client_manager.conf
 
         return tenacity.AsyncRetrying(
             stop=tenacity.stop_after_attempt(conf.number_of_attempts),
@@ -226,7 +210,7 @@ class RedisSemaphore(Semaphore):
                 max=conf.retry_max_delay,
             ),
             retry=tenacity.retry_if_not_exception_type(
-                (CantAcquireError, asyncio.CancelledError, asyncio.TimeoutError)
+                (CantAcquireError, asyncio.CancelledError, TimeoutError)
             ),
             reraise=True,
             before_sleep=before_sleep_log(self._logger, logging.WARNING),  # type: ignore
@@ -234,15 +218,15 @@ class RedisSemaphore(Semaphore):
 
     async def _ping(self, acquisition_id: str) -> None:
         assert self.heartbeat_max_interval is not None
-        acquire_client = self.__client_manager.get_acquire_client()
+        acquire_client = self._client_manager.get_acquire_client()
         ping_script = acquire_client.register_script(lua.PING_SCRIPT)
         while True:
-            await asyncio.sleep(self._resolved_ping_interval)
+            await asyncio.sleep(self._ping_interval)
             try:
                 async with asyncio.timeout(self.heartbeat_max_interval / 2.0):
                     await ping_script(
                         keys=[
-                            self._get_semaphore_waiting_key(self.name),
+                            self._get_semaphore_waiting_heartbeat_key(self.name),
                             self._get_semaphore_key(self.name),
                         ],
                         args=[acquisition_id, self.heartbeat_max_interval, time.time()],
@@ -251,18 +235,23 @@ class RedisSemaphore(Semaphore):
             except Exception:
                 self._logger.warning("Error pinging => let's retry", exc_info=True)
 
+    def _pop_ping_task(self, acquisition_id: str) -> asyncio.Task | None:
+        with self._ping_task_lock:
+            return self._ping_tasks.pop(acquisition_id, None)
+
     def _create_ping_task(self, acquisition_id: str) -> None:
         callback = (
             self._overriden_ping_func if self._overriden_ping_func else self._ping
         )
         task = asyncio.create_task(callback(acquisition_id))
-        self._ping_tasks[acquisition_id] = task
-        task.add_done_callback(lambda _: self._ping_tasks.pop(acquisition_id, None))
+        with self._ping_task_lock:
+            self._ping_tasks[acquisition_id] = task
+        task.add_done_callback(lambda _: self._pop_ping_task(acquisition_id))
 
-    async def _acquire(self) -> _AcquireResult:
+    async def _acquire(self) -> AcquireResult:
         before = time.perf_counter()
         acquisition_id = uuid.uuid4().hex
-        acquire_client = self.__client_manager.get_acquire_client()
+        acquire_client = self._client_manager.get_acquire_client()
         queue_script = acquire_client.register_script(lua.QUEUE_SCRIPT)
         wake_up_nexts_script = acquire_client.register_script(lua.WAKE_UP_NEXTS_SCRIPT)
         acquire_script = acquire_client.register_script(lua.ACQUIRE_SCRIPT)
@@ -281,10 +270,13 @@ class RedisSemaphore(Semaphore):
                             await queue_script(
                                 keys=[
                                     self._get_semaphore_waiting_key(self.name),
+                                    self._get_semaphore_waiting_heartbeat_key(
+                                        self.name
+                                    ),
                                 ],
                                 args=[
                                     acquisition_id,
-                                    self._resolved_heartbeat_max_interval,
+                                    self._heartbeat_max_interval,
                                     self._resolved_ttl,
                                     time.time(),
                                 ],
@@ -299,10 +291,13 @@ class RedisSemaphore(Semaphore):
                                         self._get_semaphore_key(self.name),
                                         self._get_semaphore_ttl_key(self.name),
                                         self._get_semaphore_waiting_key(self.name),
+                                        self._get_semaphore_waiting_heartbeat_key(
+                                            self.name
+                                        ),
                                     ],
                                     args=[
                                         self.value,
-                                        self._resolved_heartbeat_max_interval,
+                                        self._heartbeat_max_interval,
                                         self._resolved_ttl,
                                         time.time(),
                                         self._get_acquisition_notification_key(
@@ -316,7 +311,7 @@ class RedisSemaphore(Semaphore):
                                     > self.use_polling_after_delay
                                 ):
                                     # simple polling (less redis connections used)
-                                    notified = await acquire_client.lpop(
+                                    notified = await acquire_client.lpop(  # type: ignore[invalid-await]
                                         self._get_acquisition_notification_key(
                                             acquisition_id
                                         ),
@@ -326,7 +321,7 @@ class RedisSemaphore(Semaphore):
                                     await asyncio.sleep(self.poll_delay)
                                 else:
                                     # long polling (up to 1s, more reactive but more redis connections used)
-                                    notified = await acquire_client.blpop(
+                                    notified = await acquire_client.blpop(  # type: ignore[invalid-await]
                                         [
                                             self._get_acquisition_notification_key(
                                                 acquisition_id
@@ -350,7 +345,7 @@ class RedisSemaphore(Semaphore):
                                 args=[
                                     acquisition_id,
                                     self.value,
-                                    self._resolved_heartbeat_max_interval,
+                                    self._heartbeat_max_interval,
                                     self._resolved_ttl,
                                     time.time(),
                                 ],
@@ -369,14 +364,14 @@ class RedisSemaphore(Semaphore):
                 await self.__give_up_in_a_super_shield_task(acquisition_id)
                 self._logger.debug("Acquisition given up => let's raise the exception")
                 raise
-            return _AcquireResult(acquisition_id=acquisition_id, slot_number=card)
+            return AcquireResult(acquisition_id=acquisition_id, slot_number=card)
 
     async def __give_up_in_a_super_shield_task(self, acquisition_id: str) -> None:
         task = asyncio.create_task(self.__release(acquisition_id))
         await _super_shield(task, logger=self._logger)
 
     def _cancel_ping_task(self, acquisition_id: str) -> None:
-        task = self._ping_tasks.pop(acquisition_id, None)
+        task = self._pop_ping_task(acquisition_id)
         if task:
             task.cancel()
 
@@ -385,7 +380,7 @@ class RedisSemaphore(Semaphore):
         the code to be cancelled in the middle of the release."""
         if self.heartbeat_max_interval is not None:
             self._cancel_ping_task(acquisition_id)
-        release_client = self.__client_manager.get_release_client()
+        release_client = self._client_manager.get_release_client()
         release_script = release_client.register_script(lua.RELEASE_SCRIPT)
         async for attempt in self._async_retrying():
             with attempt:
@@ -394,25 +389,16 @@ class RedisSemaphore(Semaphore):
                         self._get_semaphore_key(self.name),
                         self._get_semaphore_ttl_key(self.name),
                         self._get_semaphore_waiting_key(self.name),
+                        self._get_semaphore_waiting_heartbeat_key(self.name),
                     ],
                     args=[acquisition_id],
                 )
 
-    async def _arelease(self, acquisition_id: str) -> None:
+    async def _release(self, acquisition_id: str) -> None:
         await self.__give_up_in_a_super_shield_task(acquisition_id)
 
-    def _release(self, acquisition_id: str) -> None:
-        raise NotImplementedError(
-            "This method is not supported for RedisSemaphore => use arelease() coroutine instead"
-        )
-
-    def locked(self) -> bool:
-        raise NotImplementedError(
-            "This method is not supported for RedisSemaphore => use alocked() coroutine instead"
-        )
-
-    async def alocked(self) -> bool:
-        acquire_client = self.__client_manager.get_acquire_client()
+    async def locked(self) -> bool:
+        acquire_client = self._client_manager.get_acquire_client()
         card_script = acquire_client.register_script(lua.CARD_SCRIPT)
         async for attempt in self._async_retrying():
             with attempt:
@@ -433,13 +419,8 @@ class RedisSemaphore(Semaphore):
         names: list[str] | None = None,
         limit: int = 100,
         config: RedisConfig | None = None,
-        _client_manager: RedisClientManager | None = None,
     ) -> dict[str, SemaphoreStats]:
-        client_manager: RedisClientManager
-        if _client_manager is not None:
-            client_manager = _client_manager
-        else:
-            client_manager = RedisClientManager(conf=config or RedisConfig())
+        client_manager = _get_client_manager(config or RedisConfig())
         results: dict[str, SemaphoreStats] = {}
         client = client_manager.get_acquire_client()
         pattern = _get_semaphore_key(name="*", namespace=client_manager.conf.namespace)

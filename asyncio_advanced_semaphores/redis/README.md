@@ -9,7 +9,6 @@ For details on Redis keys structure and Lua scripts, see [lua/README.md](lua/REA
 `RedisSemaphore` provides a distributed counting semaphore that works across multiple processes and machines. It inherits from the abstract `Semaphore` class and implements all required methods using Redis as the coordination backend.
 
 Key features:
-- **Drop-in compatible**: Same interface as `asyncio.Semaphore` (`acquire()` returns `bool`, `release()` takes no arguments)
 - **Distributed**: Works across multiple processes/machines via Redis
 - **Fair queuing**: FIFO ordering for waiting clients
 - **Automatic cleanup**: Dead clients are detected and their slots released
@@ -37,7 +36,9 @@ Key features:
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Note: TTL cleanup is performed inline within the Lua scripts (`wake_up_nexts.lua` and `card.lua`) rather than by a separate background task. This simplifies the architecture while maintaining correctness.
+Notes:
+- TTL cleanup is performed inline within the Lua scripts (`wake_up_nexts.lua` and `card.lua`) rather than by a separate background task. This simplifies the architecture while maintaining correctness.
+- The waiting queue uses two separate Redis keys: one for FIFO ordering (insertion time) and one for liveness detection (heartbeat expiration). This ensures strict fair queuing where heartbeat refreshes do not affect queue position.
 
 ## Components
 
@@ -47,11 +48,11 @@ The main semaphore class with the following configuration:
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `name` | `str` | random UUID | Semaphore name. Same name = shared semaphore |
+| `name` | `str` | required | Semaphore name. Same name = shared semaphore |
 | `value` | `int` | required | Number of available slots |
 | `max_acquire_time` | `float \| None` | `None` | Maximum time to wait for acquisition |
 | `ttl` | `int \| None` | `None` | Maximum hold time after acquisition |
-| `heartbeat_max_interval` | `int \| None` | `5` | Max seconds between heartbeats before considered dead |
+| `heartbeat_max_interval` | `int \| None` | `180` | Max seconds between heartbeats before considered dead |
 | `config` | `RedisConfig` | default instance | Redis configuration |
 
 ### RedisClientManager (`client.py`)
@@ -81,7 +82,7 @@ Configuration for Redis connections:
 ## Acquisition Flow (Python Side)
 
 ```python
-async def acquire(self) -> bool:
+async def acquire(self) -> AcquireResult:
     # 1. Generate unique acquisition_id
     acquisition_id = uuid.uuid4().hex
     
@@ -106,12 +107,9 @@ async def acquire(self) -> bool:
     # Returns {changed, card} where card is the current slot count
     changed, card = await acquire_script(...)
     
-    # 6. Push acquisition_id to internal stack
-    self.__acquisition_id_stack.append(acquisition_id)
+    # 6. Log acquisition (name, acquire_time, slot_number, max_slots, type)
     
-    # 7. Log acquisition (name, acquire_time, slot_number, max_slots, type)
-    
-    return True  # Compatible with asyncio.Semaphore
+    return AcquireResult(acquisition_id=acquisition_id, slot_number=card)
 ```
 
 ### Notification Mechanism
@@ -131,28 +129,26 @@ If any exception occurs during acquisition (including `asyncio.CancelledError`):
 ## Release Flow (Python Side)
 
 ```python
-async def arelease(self) -> None:
-    # 1. Pop acquisition_id from internal stack
-    acquisition_id = self.__acquisition_id_stack.pop()
-    
-    # 2. Cancel heartbeat task
+async def release(self, acquisition_id: str) -> None:
+    # 1. Cancel heartbeat task
     self._cancel_ping_task(acquisition_id)
     
-    # 3. Remove from Redis (release.lua)
+    # 2. Remove from Redis (release.lua)
     await release_script(...)
     
-    # 4. Log release (name, type)
+    # 3. Log release (name, type)
 ```
 
 The release is wrapped in a "super shield" task to ensure it completes even during cancellation.
 
 ## Acquisition ID Tracking
 
-Each `Semaphore` instance maintains an internal `__acquisition_id_stack` (a list) that tracks acquisition IDs:
+Each acquisition is tracked with a unique `acquisition_id`:
 
-- Uses LIFO (stack) to support **nested acquisitions** of the same semaphore
-- When `release()` or `arelease()` is called, it pops the most recent acquisition ID from the stack
-- This is managed internally by the base `Semaphore` class, making the API compatible with `asyncio.Semaphore`
+- Generated as a UUID when `acquire()` is called
+- Returned to the caller as part of the `AcquireResult` object
+- Must be passed to `release()` to release the specific slot
+- Enables precise tracking and release of individual acquisitions
 
 ## Retry Logic
 
@@ -214,16 +210,16 @@ sem = RedisSemaphore(
 )
 
 # Use as context manager (recommended)
-async with sem:
+async with sem.cm():
     # Do work with acquired slot
     pass
 
 # Or manual acquire/release
-await sem.acquire()
+result = await sem.acquire()
 try:
     # Do work
     pass
 finally:
-    await sem.arelease()
+    await sem.release(result.acquisition_id)
 ```
 
