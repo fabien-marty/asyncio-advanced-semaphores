@@ -48,3 +48,17 @@ jobs:
             - name: Status
               run: |
                   echo "OK"
+
+    publish_pypi:
+        runs-on: ubuntu-24.04
+        needs: ["ci"]
+        if: github.event_name == 'release' && github.event.action == 'created'
+        steps:
+            - name: Build
+              run: |
+                  make build
+            - name: Publish
+              run: |
+                  make publish
+              env:
+                  UV_PUBLISH_TOKEN: ${{ secrets.PYPI_TOKEN }}
