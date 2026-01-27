@@ -219,9 +219,9 @@ result = await sem.acquire()
 ```
 
 [!WARNING]
-The heartbeat task is completly automatic (you don't have to do anything to keep the slot alive) but this is an
-asynchronous task. So don't block the event loop for too long to avoid blocking the heartbeat task and automatically
-releasing the slot.
+> The heartbeat task is completly automatic (you don't have to do anything to keep the slot alive) but this is an
+> asynchronous task. So don't block the event loop for too long to avoid blocking the heartbeat task and automatically
+> releasing the slot.
 
 ## DEV
 
