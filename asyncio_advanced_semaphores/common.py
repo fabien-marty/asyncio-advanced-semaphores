@@ -206,6 +206,12 @@ class Semaphore(ABC):
             ```
 
         """
+        self._logger.debug(
+            "Acquiring semaphore...",
+            semaphore_name=self.name,
+            type=self._get_type(),
+            max_slots=self.value,
+        )
         before = time.perf_counter()
         result = await self._acquire()
         acquire_time = time.perf_counter() - before
@@ -240,6 +246,12 @@ class Semaphore(ABC):
             ```
 
         """
+        self._logger.debug(
+            "Releasing semaphore...",
+            semaphore_name=self.name,
+            acquisition_id=acquisition_id,
+            type=self._get_type(),
+        )
         await self._release(acquisition_id)
         self._logger.info(
             "Release successful",
