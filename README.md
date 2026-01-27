@@ -218,7 +218,7 @@ result = await sem.acquire()
 # `heartbeat_max_interval` value (180 seconds) which is a lot lower than the `ttl` value (86400 seconds).
 ```
 
-[!WARNING]
+> [!WARNING]
 > The heartbeat task is completly automatic (you don't have to do anything to keep the slot alive) but this is an
 > asynchronous task. So don't block the event loop for too long to avoid blocking the heartbeat task and automatically
 > releasing the slot.
