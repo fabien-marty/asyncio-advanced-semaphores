@@ -3,7 +3,7 @@ import uuid
 from dataclasses import dataclass, field
 
 from asyncio_advanced_semaphores.common import (
-    AcquireResult,
+    AcquisitionResult,
     Semaphore,
     SemaphoreStats,
 )
@@ -48,7 +48,7 @@ class MemorySemaphore(Semaphore):
     async def locked(self) -> bool:
         return self._queue.full()
 
-    async def _acquire(self) -> AcquireResult:
+    async def _acquire(self) -> AcquisitionResult:
         acquisition_id = uuid.uuid4().hex
         task = _get_current_task()
         try:
@@ -66,7 +66,7 @@ class MemorySemaphore(Semaphore):
             self._queue.add_timer(
                 acquisition_id, self.ttl, self._schedule_expire, acquisition_id
             )
-        return AcquireResult(acquisition_id=acquisition_id, slot_number=slot_number)
+        return AcquisitionResult(acquisition_id=acquisition_id, slot_number=slot_number)
 
     def __release(self, acquisition_id: str) -> _QueueItem | None:
         self._queue.cancel_and_remove_timer(acquisition_id)

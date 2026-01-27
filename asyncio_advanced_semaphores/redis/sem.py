@@ -15,7 +15,7 @@ from tenacity import before_sleep_log
 
 from asyncio_advanced_semaphores.common import (
     _DEFAULT_LOGGER,
-    AcquireResult,
+    AcquisitionResult,
     Semaphore,
     SemaphoreStats,
 )
@@ -248,7 +248,7 @@ class RedisSemaphore(Semaphore):
             self._ping_tasks[acquisition_id] = task
         task.add_done_callback(lambda _: self._pop_ping_task(acquisition_id))
 
-    async def _acquire(self) -> AcquireResult:
+    async def _acquire(self) -> AcquisitionResult:
         before = time.perf_counter()
         acquisition_id = uuid.uuid4().hex
         acquire_client = self._client_manager.get_acquire_client()
@@ -364,7 +364,7 @@ class RedisSemaphore(Semaphore):
                 await self.__give_up_in_a_super_shield_task(acquisition_id)
                 self._logger.debug("Acquisition given up => let's raise the exception")
                 raise
-            return AcquireResult(acquisition_id=acquisition_id, slot_number=card)
+            return AcquisitionResult(acquisition_id=acquisition_id, slot_number=card)
 
     async def __give_up_in_a_super_shield_task(self, acquisition_id: str) -> None:
         task = asyncio.create_task(self.__release(acquisition_id))

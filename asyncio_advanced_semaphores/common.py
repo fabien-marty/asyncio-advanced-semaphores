@@ -53,7 +53,7 @@ class SemaphoreStats:
 
 
 @dataclass
-class AcquireResult:
+class AcquisitionResult:
     """Result of a semaphore acquisition.
 
     This dataclass contains the acquisition ID and the slot number.
@@ -71,19 +71,19 @@ class AcquireResult:
     """The number of the slot acquired (starting from 0)."""
 
 
-class SemaphoreContextManager(AbstractAsyncContextManager[AcquireResult]):
+class SemaphoreContextManager(AbstractAsyncContextManager[AcquisitionResult]):
     __semaphore: Semaphore | None
-    __result: AcquireResult | None
+    __result: AcquisitionResult | None
 
     def __init__(self, semaphore: Semaphore):
         self.__semaphore = semaphore
         self.__result = None
 
-    async def __aenter__(self) -> AcquireResult:
+    async def __aenter__(self) -> AcquisitionResult:
         """Enter the async context manager by acquiring the semaphore.
 
         Returns:
-            An `AcquireResult` object containing the acquisition ID and the slot number.
+            An `AcquisitionResult` object containing the acquisition ID and the slot number.
 
         """
         if self.__result is not None:
@@ -174,10 +174,10 @@ class Semaphore(ABC):
         pass  # pragma: no cover
 
     @abstractmethod
-    async def _acquire(self) -> AcquireResult:
+    async def _acquire(self) -> AcquisitionResult:
         pass  # pragma: no cover
 
-    async def acquire(self) -> AcquireResult:
+    async def acquire(self) -> AcquisitionResult:
         """Acquire the semaphore (manually).
 
         This method acquires one slot from the semaphore. If no slots are
@@ -188,7 +188,7 @@ class Semaphore(ABC):
         with `release()` method.
 
         Returns:
-            An `AcquireResult` object containing the acquisition ID and the slot number.
+            An `AcquisitionResult` object containing the acquisition ID and the slot number.
 
         Raises:
             TimeoutError: If `max_acquire_time` is set and the
@@ -247,7 +247,7 @@ class Semaphore(ABC):
             type=self._get_type(),
         )
 
-    def cm(self) -> AbstractAsyncContextManager[AcquireResult]:
+    def cm(self) -> AbstractAsyncContextManager[AcquisitionResult]:
         return SemaphoreContextManager(self)
 
     @classmethod

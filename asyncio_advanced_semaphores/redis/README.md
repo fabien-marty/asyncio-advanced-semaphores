@@ -82,7 +82,7 @@ Configuration for Redis connections:
 ## Acquisition Flow (Python Side)
 
 ```python
-async def acquire(self) -> AcquireResult:
+async def acquire(self) -> AcquisitionResult:
     # 1. Generate unique acquisition_id
     acquisition_id = uuid.uuid4().hex
     
@@ -109,7 +109,7 @@ async def acquire(self) -> AcquireResult:
     
     # 6. Log acquisition (name, acquire_time, slot_number, max_slots, type)
     
-    return AcquireResult(acquisition_id=acquisition_id, slot_number=card)
+    return AcquisitionResult(acquisition_id=acquisition_id, slot_number=card)
 ```
 
 ### Notification Mechanism
@@ -146,7 +146,7 @@ The release is wrapped in a "super shield" task to ensure it completes even duri
 Each acquisition is tracked with a unique `acquisition_id`:
 
 - Generated as a UUID when `acquire()` is called
-- Returned to the caller as part of the `AcquireResult` object
+- Returned to the caller as part of the `AcquisitionResult` object
 - Must be passed to `release()` to release the specific slot
 - Enables precise tracking and release of individual acquisitions
 

@@ -85,7 +85,7 @@ class _QueueItem:
 Each acquisition is tracked with a unique `acquisition_id`:
 
 - Generated as a UUID when `acquire()` is called
-- Returned to the caller as part of the `AcquireResult` object
+- Returned to the caller as part of the `AcquisitionResult` object
 - Must be passed to `release()` to release the specific slot
 - Enables precise tracking and release of individual acquisitions
 
@@ -111,7 +111,7 @@ Each acquisition is tracked with a unique `acquisition_id`:
 │  4. Log acquisition (name, acquire_time, slot_number, max_slots)│
 │                              │                                  │
 │                              ▼                                  │
-│  5. Return AcquireResult(acquisition_id, slot_number)           │
+│  5. Return AcquisitionResult(acquisition_id, slot_number)           │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
