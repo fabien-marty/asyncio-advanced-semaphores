@@ -50,7 +50,8 @@ All keys are prefixed with a configurable namespace (default: `adv-sem`).
 
 ### Liveness Detection
 
-- **Heartbeat (ping)**: Clients periodically refresh their score in both `semaphore_waiting_heartbeat` and `semaphore_main` keys
+- **Heartbeat (ping)**: Clients periodically refresh their score in both `semaphore_waiting_heartbeat` and `semaphore_main` keys. The `ping.lua` script returns `{changed_waiting, changed_semaphore}` to indicate which keys were updated.
+- **Dead client detection**: If the ping script returns `{0, 0}` (neither key was updated), the client was considered dead and removed by another process. The Python heartbeat task logs an error and stops in this case.
 - **Expiration**: If a client fails to heartbeat within `heartbeat_max_interval`, its score becomes < now and it's considered expired
 - **Cleanup**: Expired entries are removed via `ZREMRANGEBYSCORE key -inf now`
 
@@ -160,17 +161,26 @@ Releases an acquired slot.
 Refreshes heartbeat for a client (in waiting queue or holding a slot).
 
 **Keys:**
-- `KEYS[1]`: waiting key with heartbeat (ZSET)
-- `KEYS[2]`: semaphore key (ZSET)
+- `KEYS[1]`: waiting key (ZSET) - for FIFO ordering (only used for EXPIRE refresh)
+- `KEYS[2]`: waiting key with heartbeat (ZSET) - for liveness detection
+- `KEYS[3]`: semaphore key (ZSET)
 
 **Args:**
 - `ARGV[1]`: acquisition_id
 - `ARGV[2]`: heartbeat_max_interval (seconds)
-- `ARGV[3]`: now (timestamp)
+- `ARGV[3]`: ttl (seconds)
+- `ARGV[4]`: now (timestamp)
 
 **Behavior:**
-- Updates score with `ZADD XX` (only if exists) in waiting heartbeat key and semaphore key
-- Note: Does NOT update the waiting key (FIFO ordering) to preserve queue position
+- Refreshes EXPIRE on all three keys to avoid Redis-level expiration
+- Updates score with `ZADD XX CH` (only if exists, return changed count) in waiting heartbeat and semaphore keys
+- Note: Does NOT update the waiting key score (FIFO ordering) to preserve queue position
+
+**Returns:** `{changed_waiting, changed_semaphore}` where:
+- `changed_waiting`: 1 if waiting heartbeat key was updated, 0 otherwise
+- `changed_semaphore`: 1 if semaphore key was updated, 0 otherwise
+
+This return value allows the caller to detect if the client was considered dead (both values are 0).
 
 ### `card.lua`
 

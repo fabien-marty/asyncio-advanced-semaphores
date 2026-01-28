@@ -98,3 +98,26 @@ async def test_thread_safety_multiple_threads_same_semaphore():
     assert max_concurrent <= sem_value, f"Max concurrent {max_concurrent} > {sem_value}"
     # Verify the semaphore was actually contested (at least once both threads were active)
     assert max_concurrent == sem_value, "Semaphore was never fully utilized"
+
+
+async def test_waiting_longer_than_ttl_plus_10():
+    max_acquire_time = 0.0
+
+    async def worker(sem: RedisSemaphore) -> None:
+        nonlocal max_acquire_time
+        before = time.perf_counter()
+        async with sem.cm() as result:
+            after = time.perf_counter()
+            max_acquire_time = max(max_acquire_time, after - before)
+            print(f"Acquired: {result.acquisition_id} in {after - before} seconds")  # noqa: T201
+            await asyncio.sleep(4)
+
+    sem = RedisSemaphore(
+        name="fabien",
+        value=1,
+        ttl=5,
+    )
+    await asyncio.gather(
+        worker(sem), worker(sem), worker(sem), worker(sem), worker(sem)
+    )
+    assert max_acquire_time > 16
