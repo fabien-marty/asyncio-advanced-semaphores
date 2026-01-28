@@ -52,7 +52,7 @@ The main semaphore class with the following configuration:
 | `value` | `int` | required | Number of available slots |
 | `max_acquire_time` | `float \| None` | `None` | Maximum time to wait for acquisition |
 | `ttl` | `int \| None` | `None` | Maximum hold time after acquisition |
-| `heartbeat_max_interval` | `int \| None` | `180` | Max seconds between heartbeats before considered dead |
+| `heartbeat_max_interval` | `int` | `180` | Max seconds between heartbeats before considered dead. Auto-adjusted to TTL if TTL is lower. |
 | `config` | `RedisConfig` | default instance | Redis configuration |
 
 ### RedisClientManager (`client.py`)
@@ -125,6 +125,14 @@ If any exception occurs during acquisition (including `asyncio.CancelledError`):
 1. The ping task is cancelled
 2. The `release.lua` script removes the client from all Redis keys
 3. This cleanup runs in a "super shield" to ensure it completes even if the task is cancelled
+
+### Heartbeat Task
+
+The heartbeat task (`_ping_task`) periodically refreshes the client's presence in Redis. It uses the return values from `ping.lua` to detect its state:
+
+- **`changed_semaphore > 0`**: Client holds a slot and heartbeat was refreshed
+- **`changed_waiting > 0`**: Client is in the waiting queue and heartbeat was refreshed
+- **`changed_waiting == 0 and changed_semaphore == 0`**: Client was considered dead and removed by another process (e.g., due to network issues or long GC pauses). The heartbeat task logs an error and stops.
 
 ## Release Flow (Python Side)
 

@@ -5,11 +5,13 @@ local heartbeat_max_interval = tonumber(ARGV[2]) -- heartbeat max interval in se
 local ttl = tonumber(ARGV[3]) -- ttl in seconds
 local now = tonumber(ARGV[4]) -- now timestamp in seconds
 
--- Add the client to the waiting list (NX = only if not exists, preserves queue position on retry)
+-- Add the client to the waiting list
+-- NX: Only add new elements. Don't update already existing elements.
 redis.call('ZADD', waiting_key, 'NX', now, acquisition_id)
 redis.call('EXPIRE', waiting_key, ttl + 10)
 
--- Add the client to the waiting list with heartbeat (NX = only if not exists, preserves queue position on retry)
+-- Add the client to the waiting list with heartbeat
+-- NX: Only add new elements. Don't update already existing elements.
 redis.call('ZADD', waiting_key_heartbeat, 'NX', now + heartbeat_max_interval, acquisition_id)
 redis.call('EXPIRE', waiting_key_heartbeat, ttl + 10)
 

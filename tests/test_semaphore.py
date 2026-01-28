@@ -170,13 +170,11 @@ async def test_timeout_whole_block(sem: Semaphore):
             RedisSemaphore(
                 name="test-stats-1",
                 value=10,
-                heartbeat_max_interval=None,
                 ttl=None,
             ),
             RedisSemaphore(
                 name="test-stats-2",
                 value=20,
-                heartbeat_max_interval=None,
                 ttl=None,
             ),
         ),
