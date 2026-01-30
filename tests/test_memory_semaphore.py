@@ -76,6 +76,43 @@ async def test_manual_acquire_release():
     await assert_not_locked(sem)
 
 
+async def test_queue_manager_maxsize_change_when_empty():
+    """Test that QueueManager allows maxsize change when queue is empty."""
+    qm = _QueueManager()
+    name = "test-maxsize-change"
+
+    # Create a semaphore with value=1, acquire and release it
+    sem1 = MemorySemaphore(value=1, name=name, _queue_manager=qm)
+    async with sem1.cm():
+        pass
+
+    # Now create a semaphore with a different value - should work because queue is empty
+    sem2 = MemorySemaphore(value=2, name=name, _queue_manager=qm)
+    async with sem2.cm():
+        pass
+
+    # Verify the new maxsize is in effect
+    assert qm.get_size() == 1
+
+
+async def test_queue_manager_maxsize_change_when_not_empty():
+    """Test that QueueManager raises exception when maxsize changes on non-empty queue."""
+    qm = _QueueManager()
+    name = "test-maxsize-mismatch"
+
+    sem1 = MemorySemaphore(value=1, name=name, _queue_manager=qm)
+    result = await sem1.acquire()
+
+    # Try to use a semaphore with a different value while the first one holds the lock
+    # The exception is raised when the queue is accessed (lazy access via _queue property)
+    sem2 = MemorySemaphore(value=2, name=name, _queue_manager=qm)
+    with pytest.raises(Exception, match="maxsize mismatch"):
+        await sem2.locked()
+
+    # Cleanup
+    await sem1.release(result.acquisition_id)
+
+
 async def test_thread_safety_multple_threads_same_semaphore():
     """Test thread-safety with multiple threads acquiring the same semaphore name.
 
