@@ -215,16 +215,27 @@ class _QueueManager:
     """
 
     def get_or_create_queue(self, name: str, maxsize: int) -> _BoundedQueue:
+        def create_queue(maxsize: int) -> _BoundedQueue:
+            # Before creating a new queue, let's cleanup old empty queues
+            return _BoundedQueue.create(maxsize)
+
         with self._lock:
             if name not in self._queues:
                 # Before creating a new queue, let's cleanup old empty queues
                 self._cleanup_old_empty_queues()
-                queue = _BoundedQueue.create(maxsize)
+                queue = create_queue(maxsize)
                 self._queues[name] = queue
             else:
                 queue = self._queues[name]
                 if queue.maxsize != maxsize:
-                    raise Exception("Queue maxsize mismatch")
+                    if queue.is_empty():
+                        # The queue is empty so we can rebuilt it to change the maxsize
+                        queue = create_queue(maxsize)
+                        self._queues[name] = queue
+                    else:
+                        raise Exception(
+                            "There is already a used semaphore with this name but the maxsize mismatch => fix the maxsize or release all slots of the old semaphore"
+                        )
             # Touch the queue to prevent cleanup while reference is held
             queue.touch()
             return queue
