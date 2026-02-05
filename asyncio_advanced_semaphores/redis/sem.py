@@ -250,6 +250,8 @@ class RedisSemaphore(Semaphore):
                         self._logger.debug("Acquisition key refreshed")
                     elif changed_waiting > 0:
                         self._logger.debug("Waiting key refreshed")
+            except asyncio.CancelledError:
+                break
             except Exception:
                 self._logger.warning("Error pinging => let's retry", exc_info=True)
 
@@ -258,10 +260,8 @@ class RedisSemaphore(Semaphore):
             return self._ping_tasks.pop(acquisition_id, None)
 
     def _create_ping_task(self, acquisition_id: str) -> None:
-        callback = (
-            self._overriden_ping_func if self._overriden_ping_func else self._ping
-        )
-        task = asyncio.create_task(callback(acquisition_id))
+        coro = self._overriden_ping_func if self._overriden_ping_func else self._ping
+        task = asyncio.create_task(coro(acquisition_id))
         with self._ping_task_lock:
             self._ping_tasks[acquisition_id] = task
         task.add_done_callback(lambda _: self._pop_ping_task(acquisition_id))
