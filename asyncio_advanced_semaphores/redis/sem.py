@@ -222,8 +222,8 @@ class RedisSemaphore(Semaphore):
         )
 
     async def _ping(self, acquisition_id: str) -> None:
-        acquire_client = self._client_manager.get_acquire_client()
-        ping_script = acquire_client.register_script(lua.PING_SCRIPT)
+        watchdog_client = self._client_manager.get_watchdog_client()
+        ping_script = watchdog_client.register_script(lua.PING_SCRIPT)
         while True:
             await asyncio.sleep(self._ping_interval)
             try:

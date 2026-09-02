@@ -34,15 +34,16 @@ def _get_client_manager(config: RedisConfig) -> "RedisClientManager":
 class RedisClientManager:
     """Manages Redis client connections with separate pools for acquire and release operations.
 
-    This manager maintains two distinct connection pools to prevent deadlocks:
+    This manager maintains three distinct connection pools to prevent deadlocks:
     - **Acquire pool**: Used for operations that may block (e.g., BLPOP during semaphore acquisition)
     - **Release pool**: Used for non-blocking release operations
+    - **Watchdog pool**: Used for heartbeat operations
 
     The separation ensures that release operations can always proceed even when all
     acquire connections are blocked waiting for semaphore slots.
 
     Key features:
-    - **Dual connection pools**: Prevents deadlocks between acquire and release operations
+    - **Separate connection pools**: Prevents deadlocks and protects heartbeats
     - **Lazy initialization**: Pools and clients are created on first use
 
     Attributes:
@@ -70,20 +71,41 @@ class RedisClientManager:
 
     conf: RedisConfig = field(default_factory=RedisConfig)
     _redis_kwargs: dict[str, Any] = field(default_factory=dict)
+    _acquire_kwargs: dict[str, Any] = field(default_factory=dict)
+    _release_kwargs: dict[str, Any] = field(default_factory=dict)
+    _watchdog_kwargs: dict[str, Any] = field(default_factory=dict)
     _acquire_pool: BlockingConnectionPool | None = None
     _release_pool: BlockingConnectionPool | None = None
+    _watchdog_pool: BlockingConnectionPool | None = None
     _acquire_client: Redis | None = None
     _release_client: Redis | None = None
+    _watchdog_client: Redis | None = None
 
     def __post_init__(self):
+        acquire_connections = int(self.conf.max_connections * 0.4)
+        release_connections = int(self.conf.max_connections * 0.4)
+        watchdog_connections = (
+            self.conf.max_connections - acquire_connections - release_connections
+        )
         self._redis_kwargs = {
-            "max_connections": self.conf.max_connections // 2,
             "timeout": None,
             "retry_on_timeout": False,
             "retry_on_error": False,
             "health_check_interval": 10,
             "socket_connect_timeout": self.conf.socket_connect_timeout,
             "socket_timeout": self.conf.socket_timeout,
+        }
+        self._acquire_kwargs = {
+            **self._redis_kwargs,
+            "max_connections": acquire_connections,
+        }
+        self._release_kwargs = {
+            **self._redis_kwargs,
+            "max_connections": release_connections,
+        }
+        self._watchdog_kwargs = {
+            **self._redis_kwargs,
+            "max_connections": watchdog_connections,
         }
 
     def _get_acquire_pool(self) -> BlockingConnectionPool:
@@ -96,7 +118,7 @@ class RedisClientManager:
         """
         if self._acquire_pool is None:
             self._acquire_pool = BlockingConnectionPool.from_url(
-                self.conf.url, **self._redis_kwargs
+                self.conf.url, **self._acquire_kwargs
             )
         return self._acquire_pool
 
@@ -111,9 +133,17 @@ class RedisClientManager:
         """
         if self._release_pool is None:
             self._release_pool = BlockingConnectionPool.from_url(
-                self.conf.url, **self._redis_kwargs
+                self.conf.url, **self._release_kwargs
             )
         return self._release_pool
+
+    def _get_watchdog_pool(self) -> BlockingConnectionPool:
+        """Get or create the connection pool dedicated to heartbeats."""
+        if self._watchdog_pool is None:
+            self._watchdog_pool = BlockingConnectionPool.from_url(
+                self.conf.url, **self._watchdog_kwargs
+            )
+        return self._watchdog_pool
 
     def get_acquire_client(self) -> Redis:
         """Get or create the Redis client for acquire operations.
@@ -141,6 +171,12 @@ class RedisClientManager:
             self._release_client = Redis.from_pool(self._get_release_pool())
         return self._release_client
 
+    def get_watchdog_client(self) -> Redis:
+        """Get or create the Redis client dedicated to heartbeat operations."""
+        if self._watchdog_client is None:
+            self._watchdog_client = Redis.from_pool(self._get_watchdog_pool())
+        return self._watchdog_client
+
     async def reset(self):
         """Close all clients and connection pools, and reset internal state.
 
@@ -150,7 +186,10 @@ class RedisClientManager:
         """
         await self.get_acquire_client().aclose(close_connection_pool=True)
         await self.get_release_client().aclose(close_connection_pool=True)
+        await self.get_watchdog_client().aclose(close_connection_pool=True)
         self._acquire_pool = None
         self._release_pool = None
+        self._watchdog_pool = None
         self._acquire_client = None
         self._release_client = None
+        self._watchdog_client = None

@@ -32,3 +32,7 @@ class RedisConfig:
 
     retry_max_delay: float = 60
     """Maximum delay between Redis operations (seconds)."""
+
+    def __post_init__(self) -> None:
+        if self.max_connections <= 10:
+            raise ValueError("max_connections must be greater than 10")
